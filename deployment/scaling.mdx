@@ -1,0 +1,323 @@
+---
+title: Scaling Strategies
+description: Horizontal and vertical scaling patterns for Chat2Cash services
+---
+
+## Overview
+
+Chat2Cash is architected for independent scaling of its API and worker tiers. This separation allows you to optimize resource allocation based on traffic patterns and AI processing demands.
+
+## Worker Scaling (Horizontal)
+
+### Default Configuration
+
+```yaml
+worker:
+  deploy:
+    replicas: 2
+```
+
+The worker service runs **2 replicas by default**, each polling the same BullMQ queue for AI extraction jobs.
+
+### When to Scale Workers
+
+**Scale Up When:**
+- Queue depth consistently exceeds 10-20 jobs
+- Average job wait time exceeds acceptable latency (e.g., >30 seconds)
+- Workers are CPU-bound processing AI requests
+- You receive spike traffic from batch invoice uploads
+
+**Scale Down When:**
+- Queue is consistently empty or near-empty
+- Worker CPU utilization is below 20%
+- Cost optimization is needed during off-peak hours
+
+### Scaling Commands
+
+```bash
+# Scale to 5 worker replicas
+docker compose up -d --scale worker=5
+
+# Scale to 10 workers for batch processing
+docker compose up -d --scale worker=10
+
+# Scale back to 1 worker
+docker compose up -d --scale worker=1
+```
+
+### How BullMQ Distributes Jobs
+
+BullMQ ensures **exactly-once processing** across multiple workers:
+
+1. **Job Locking**: When a worker picks up a job, BullMQ locks it in Redis
+2. **Atomic Operations**: Only one worker can claim a job at a time
+3. **Stalled Job Detection**: If a worker crashes, the job is automatically retried
+4. **Concurrency Control**: Each worker processes jobs concurrently based on its `concurrency` setting
+
+**Worker Configuration (backend code):**
+```typescript
+const worker = new Worker('invoice-extraction', processor, {
+  connection: redis,
+  concurrency: 5, // Each worker processes 5 jobs concurrently
+});
+```
+
+### Monitoring Worker Performance
+
+**Key Metrics:**
+- **Queue Depth**: Number of waiting jobs in Redis
+- **Job Latency**: Time from job creation to completion
+- **Worker CPU/Memory**: Resource utilization per replica
+- **Failed Jobs**: Jobs that exceeded retry limits
+- **Throughput**: Jobs completed per minute
+
+**BullMQ Dashboard** (optional):
+```bash
+npx bull-board
+```
+
+Access at `http://localhost:3000/admin/queues` to visualize job metrics.
+
+## API Server Scaling (Horizontal)
+
+### Current Configuration
+
+The API service runs as a **single instance** by default:
+
+```yaml
+api:
+  ports:
+    - "3000:3000"
+```
+
+### Scaling Behind a Load Balancer
+
+To scale the API horizontally, you need:
+
+1. **Remove Port Mapping**: Let the load balancer handle external access
+2. **Add Load Balancer**: Use nginx, Traefik, or cloud load balancer
+3. **Session Management**: Ensure stateless API design (Chat2Cash is stateless by default)
+
+**Example with nginx:**
+
+```yaml
+# docker-compose.yml
+services:
+  api:
+    # Remove ports section—internal only
+    expose:
+      - "3000"
+    deploy:
+      replicas: 3  # Run 3 API instances
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+```
+
+**nginx.conf (round-robin load balancing):**
+
+```nginx
+upstream api_backend {
+    server api:3000;  # Docker Compose handles DNS for replicas
+}
+
+server {
+    listen 80;
+    location /api {
+        proxy_pass http://api_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+### When to Scale API Servers
+
+**Scale Up When:**
+- HTTP response times exceed 200ms (p95)
+- API server CPU utilization exceeds 70%
+- Concurrent connections approach file descriptor limits
+- Error rate increases due to timeouts
+
+**Scale Down When:**
+- Average CPU utilization is below 20%
+- Request rate decreases during off-peak hours
+- Cost optimization is a priority
+
+### API Scaling Best Practices
+
+- **Stateless Design**: Chat2Cash stores session data in PostgreSQL and Redis—no in-memory state
+- **Health Checks**: Ensure load balancer uses `/api/health` endpoint to route traffic
+- **Connection Pooling**: Each API replica maintains its own PostgreSQL connection pool (default: 10 connections)
+- **Rate Limiting**: Implemented per-user in Redis (shared across API replicas)
+
+## Redis Scaling Considerations
+
+### Single Redis Instance
+
+The default configuration uses **one Redis instance** for both:
+- BullMQ job queue
+- Rate limiting and session storage
+
+**Connection Limits:**
+- Redis 7 supports ~10,000 concurrent connections by default
+- Each API replica: ~5-10 connections
+- Each worker replica: ~5-10 connections
+- **Example**: 10 API + 10 workers = ~200 connections (well within limits)
+
+### When to Scale Redis
+
+**Vertical Scaling (increase memory/CPU):**
+- Queue depth exceeds 100,000 jobs
+- Memory usage approaches `maxmemory` limit
+- CPU usage exceeds 80% (rare unless doing heavy Lua scripting)
+
+**Horizontal Scaling (Redis Cluster):**
+- You exceed 10 GB of data (queue + rate limits + sessions)
+- You need high availability (Redis Sentinel or Cluster)
+- You require multi-region replication
+
+**Redis Cluster Example:**
+```yaml
+redis:
+  image: redis:7-alpine
+  command: redis-server --cluster-enabled yes --appendonly yes
+  deploy:
+    replicas: 6  # Minimum for Redis Cluster (3 masters + 3 replicas)
+```
+
+### AOF Persistence Performance
+
+Redis is configured with `--appendfsync everysec`:
+- **Write Performance**: ~50,000 writes/sec (sufficient for 100+ workers)
+- **Durability**: At most 1 second of data loss on crash
+- **Disk I/O**: ~1-5 MB/sec (negligible for modern SSDs)
+
+For higher throughput, consider:
+```bash
+redis-server --appendfsync no  # Faster, but risks losing jobs on crash
+```
+
+## PostgreSQL Scaling Considerations
+
+### Connection Pooling
+
+Each Node.js service uses a connection pool:
+
+```typescript
+// backend/src/db/index.ts
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 10,  // Max connections per service
+});
+```
+
+**Total Connections:**
+- API replicas: `10 × num_replicas`
+- Worker replicas: `10 × num_replicas`
+- Example: 5 API + 10 workers = 150 connections
+
+### PostgreSQL Connection Limits
+
+```sql
+-- Check current connections
+SELECT count(*) FROM pg_stat_activity;
+
+-- Increase max connections (requires restart)
+ALTER SYSTEM SET max_connections = 200;
+```
+
+**Default PostgreSQL 15**: 100 connections
+
+### When to Scale PostgreSQL
+
+**Vertical Scaling:**
+- CPU usage exceeds 70% during peak hours
+- Slow query logs show queries taking >500ms
+- Disk I/O wait times increase
+
+**Horizontal Scaling (Read Replicas):**
+- Read-heavy workloads (invoice history, reporting)
+- Separate analytics queries from transactional load
+- Use PostgreSQL streaming replication
+
+**Example with Read Replica:**
+```yaml
+db-replica:
+  image: postgres:15-alpine
+  environment:
+    POSTGRES_PRIMARY_HOST: db
+    POSTGRES_REPLICATION_MODE: replica
+  volumes:
+    - postgres_replica_data:/var/lib/postgresql/data
+```
+
+## Scaling Decision Matrix
+
+| Symptom | Root Cause | Solution |
+|---------|-----------|----------|
+| Queue depth growing | Workers overwhelmed | Scale workers up |
+| API latency >200ms | CPU-bound API | Scale API replicas |
+| Database CPU high | Slow queries | Add indexes, optimize queries |
+| Redis memory full | Large queue or rate limit data | Increase Redis memory or add eviction policy |
+| PostgreSQL connections maxed | Too many services | Increase `max_connections` or reduce pool size |
+| Worker CPU low, queue full | AI API rate limiting | Check Anthropic API rate limits |
+
+## Auto-Scaling Examples
+
+### Kubernetes HPA (Horizontal Pod Autoscaler)
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: worker-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: queue_depth
+      target:
+        type: AverageValue
+        averageValue: "10"  # Scale up if avg queue depth >10 per worker
+```
+
+### Docker Swarm Mode
+
+```bash
+docker service scale chat2cash_worker=10
+```
+
+## Cost Optimization
+
+### Development/Staging
+- API: 1 replica
+- Workers: 1 replica
+- Redis: 1 instance (no persistence)
+- PostgreSQL: 1 instance
+
+### Production (Low Traffic)
+- API: 2 replicas (high availability)
+- Workers: 2 replicas
+- Redis: 1 instance with AOF
+- PostgreSQL: 1 instance with backups
+
+### Production (High Traffic)
+- API: 5-10 replicas behind load balancer
+- Workers: 10-20 replicas (auto-scaled)
+- Redis: 1 instance or Sentinel cluster
+- PostgreSQL: 1 primary + 1 read replica

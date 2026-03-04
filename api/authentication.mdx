@@ -1,0 +1,355 @@
+---
+title: 'Authentication'
+description: 'API key authentication, key generation, and organization context in Chat2Cash'
+---
+
+## Authentication Methods
+
+Chat2Cash API supports two authentication methods:
+
+1. **API Key Authentication** - For machine-to-machine access (recommended for production)
+2. **JWT Bearer Token** - For human users via Neon Auth (used by the web dashboard)
+
+## API Key Authentication
+
+API keys provide secure programmatic access to the Chat2Cash API. Each key is associated with an organization and inherits its tier limits and permissions.
+
+### Key Format
+
+API keys follow the format: `c2c_live_<random_string>` or `c2c_test_<random_string>`
+
+Example: `c2c_live_pk7x9mz3w8q2j5n4r6t8v1y3`
+
+### Generating API Keys
+
+<Info>
+API keys can only be generated through the Chat2Cash web dashboard. Navigate to **Settings > API Keys** and click **Create New Key**.
+</Info>
+
+When you create an API key:
+
+1. Give it a descriptive name (e.g., "Production Server", "Staging Environment")
+2. The key is shown **once** - save it securely
+3. A masked version is stored for your reference (e.g., `c2c_live_pk7x...1y3`)
+
+### Using API Keys
+
+Include your API key in the `X-API-Key` header with every request:
+
+```bash
+curl https://api.chat2cash.com/api/orders \
+  -H "X-API-Key: c2c_live_pk7x9mz3w8q2j5n4r6t8v1y3"
+```
+
+### Security Best Practices
+
+<Warning>
+Never commit API keys to version control or expose them in client-side code. Use environment variables to store keys securely.
+</Warning>
+
+- Store keys in environment variables or secret management systems
+- Rotate keys periodically
+- Use different keys for development, staging, and production
+- Revoke compromised keys immediately from the dashboard
+
+### How API Key Authentication Works
+
+1. Client sends request with `X-API-Key` header
+2. Backend computes SHA-256 hash of the provided key
+3. Hash is looked up in the database using a constant-time comparison to prevent timing attacks
+4. If valid and active, the request proceeds with the organization context set
+
+```typescript
+// Example from authHandler.ts
+const incomingHash = crypto.createHash("sha256").update(apiKeyHeader).digest();
+const incomingHashHex = incomingHash.toString("hex");
+
+const result = await db
+  .select({ orgId: apiKeysTable.organizationId, keyHash: apiKeysTable.keyHash })
+  .from(apiKeysTable)
+  .where(and(eq(apiKeysTable.keyHash, incomingHashHex), eq(apiKeysTable.isActive, true)))
+  .limit(1);
+
+if (result.length === 0) throw new AppError("Invalid API Key", 401);
+
+// Constant-time comparison prevents timing side-channel attacks
+const storedHash = Buffer.from(result[0].keyHash, "hex");
+if (!crypto.timingSafeEqual(incomingHash, storedHash)) {
+  throw new AppError("Invalid API Key", 401);
+}
+
+req.orgId = result[0].orgId;
+```
+
+## JWT Bearer Token Authentication
+
+JWT tokens are used by the web dashboard for user authentication via Neon Auth. This method is automatically handled by the frontend and is not recommended for API integrations.
+
+### Using Bearer Tokens
+
+```bash
+curl https://api.chat2cash.com/api/orders \
+  -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+### How JWT Authentication Works
+
+1. User logs in via Neon Auth
+2. Frontend receives a JWT token
+3. Token is verified using Neon's JWKS endpoint
+4. User record is synced to the local database (JIT sync)
+5. Organization context is set from the user's `organizationId`
+
+```typescript
+// Example from authHandler.ts
+const { payload } = await jwtVerify(token, JWKS);
+
+const userId = payload.sub as string;
+const userEmail = payload.email as string;
+
+// Atomic JIT sync: upsert user in local DB on first login
+const [user] = await db
+  .insert(usersTable)
+  .values({
+    id: userId,
+    email: userEmail,
+    name: (payload.name as string) ?? "Unknown",
+  })
+  .onConflictDoUpdate({
+    target: usersTable.id,
+    set: {
+      email: userEmail,
+      name: (payload.name as string) ?? "Unknown",
+    },
+  })
+  .returning();
+
+req.user = user;
+
+if (req.user?.organizationId) {
+  req.orgId = req.user.organizationId;
+}
+```
+
+## Organization Context
+
+All authenticated requests operate within an organization context. The organization ID determines:
+
+- **Data isolation** - You can only access orders, customers, and invoices belonging to your organization
+- **Rate limits** - Based on your organization's tier (Free, Pro, Enterprise)
+- **Business settings** - GST number, business name, tax rates, etc.
+
+### How Organization Context Works
+
+**API Key Authentication:**
+- API key is linked directly to an organization
+- `req.orgId` is set from `apiKeysTable.organizationId`
+
+**JWT Authentication:**
+- User belongs to an organization
+- `req.orgId` is set from `usersTable.organizationId`
+
+### Organization Required
+
+Most endpoints require an organization context. If you attempt to access these endpoints without belonging to an organization, you'll receive a `403 Forbidden` error:
+
+```json
+{
+  "status": "error",
+  "message": "User is not part of an Organization"
+}
+```
+
+### Endpoints Requiring Organization
+
+All endpoints except `/health` require authentication and organization context:
+
+- `GET /stats`
+- `GET /orders`
+- `GET /orders/:id`
+- `GET /orders/:id/download`
+- `POST /extract`
+- `POST /extract-order`
+- `POST /generate-invoice`
+- `POST /async/extract`
+- `POST /async/extract-order`
+- `PATCH /orders/:id`
+- `PATCH /orders/:id/edit`
+- `DELETE /orders/:id`
+- `GET /admin/dlq`
+- `POST /admin/dlq/:jobId/retry`
+- `POST /admin/dlq/retry-all`
+
+## Authentication Errors
+
+### Missing Authentication
+
+```bash
+curl https://api.chat2cash.com/api/orders
+```
+
+```json
+{
+  "status": "error",
+  "message": "Authentication required"
+}
+```
+
+### Invalid API Key
+
+```bash
+curl https://api.chat2cash.com/api/orders \
+  -H "X-API-Key: invalid_key_12345"
+```
+
+```json
+{
+  "status": "error",
+  "message": "Invalid API Key"
+}
+```
+
+### Expired JWT Token
+
+```bash
+curl https://api.chat2cash.com/api/orders \
+  -H "Authorization: Bearer expired_token_here"
+```
+
+```json
+{
+  "status": "error",
+  "message": "Invalid or Expired Token"
+}
+```
+
+### No Organization
+
+```bash
+curl https://api.chat2cash.com/api/orders \
+  -H "X-API-Key: valid_key_but_no_org"
+```
+
+```json
+{
+  "status": "error",
+  "message": "User is not part of an Organization"
+}
+```
+
+## Testing Authentication
+
+You can test your authentication by calling the stats endpoint:
+
+```bash
+curl https://api.chat2cash.com/api/stats \
+  -H "X-API-Key: your_api_key_here"
+```
+
+### Success Response
+
+```json
+{
+  "total_orders": 42,
+  "pending_orders": 5,
+  "confirmed_orders": 37,
+  "total_revenue": 125430.50
+}
+```
+
+If you receive this response, your API key is valid and properly configured.
+
+## Managing API Keys
+
+### Viewing Keys
+
+View all API keys for your organization in the dashboard:
+
+```
+Settings > API Keys
+```
+
+You'll see:
+- Key name
+- Masked key (last 4 characters)
+- Creation date
+- Last used timestamp
+- Active/Inactive status
+
+### Revoking Keys
+
+Revoke a key immediately from the dashboard by clicking **Revoke** next to the key. Revoked keys cannot be reactivated - you must create a new key.
+
+When you revoke a key:
+- All requests using that key will fail with `401 Unauthorized`
+- The key is marked as `isActive: false` in the database
+- The key remains visible in the dashboard for audit purposes
+
+## Example: Complete Request
+
+Here's a complete example showing authentication with API key:
+
+```bash
+curl -X POST https://api.chat2cash.com/api/extract-order \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: c2c_live_pk7x9mz3w8q2j5n4r6t8v1y3" \
+  -H "Idempotency-Key: request-$(date +%s)" \
+  -d '{
+    "messages": [
+      {
+        "sender": "customer",
+        "text": "Hi, I would like to order 10 kg of basmati rice and 5 liters of sunflower oil"
+      },
+      {
+        "sender": "agent",
+        "text": "Sure! When do you need it delivered?"
+      },
+      {
+        "sender": "customer",
+        "text": "Tomorrow at 3 PM. Deliver to 123 Main St"
+      }
+    ]
+  }'
+```
+
+### Response
+
+```json
+{
+  "id": "ord_1709550600123",
+  "customer_name": null,
+  "items": [
+    {
+      "product_name": "Basmati Rice",
+      "quantity": 10,
+      "price": null
+    },
+    {
+      "product_name": "Sunflower Oil",
+      "quantity": 5,
+      "price": null
+    }
+  ],
+  "delivery_address": "123 Main St",
+  "delivery_date": "2026-03-05T15:00:00.000Z",
+  "special_instructions": null,
+  "total": null,
+  "confidence": "high",
+  "status": "pending",
+  "created_at": "2026-03-04T10:30:00.000Z",
+  "raw_messages": [
+    {
+      "sender": "customer",
+      "text": "Hi, I would like to order 10 kg of basmati rice and 5 liters of sunflower oil"
+    },
+    {
+      "sender": "agent",
+      "text": "Sure! When do you need it delivered?"
+    },
+    {
+      "sender": "customer",
+      "text": "Tomorrow at 3 PM. Deliver to 123 Main St"
+    }
+  ]
+}
+```

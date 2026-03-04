@@ -1,0 +1,509 @@
+---
+title: "Invoice Generation"
+description: "GST invoice generation with PDFKit, CGST/SGST/IGST calculations, and sequential numbering"
+---
+
+## Overview
+
+Chat2Cash generates **GST-compliant invoices** from confirmed orders. The invoice service handles:
+
+- **Sequential invoice numbering** (e.g., INV-2026-001)
+- **Precision-safe arithmetic** using Decimal.js
+- **CGST/SGST split** for intrastate transactions
+- **IGST** for interstate transactions
+- **Customizable tax rates** (default 18%)
+
+## Architecture
+
+### Decimal.js for Financial Precision
+
+The service uses **Decimal.js** to avoid IEEE 754 floating-point errors that can corrupt financial calculations.
+
+```typescript
+import Decimal from "decimal.js";
+
+// Configure Decimal.js for financial precision
+Decimal.set({ precision: 20, rounding: Decimal.ROUND_HALF_UP });
+```
+
+**Why Decimal.js?**
+
+```javascript
+// ❌ JavaScript float math (WRONG)
+0.1 + 0.2 === 0.30000000000000004
+
+// ✅ Decimal.js (CORRECT)
+const a = new Decimal(0.1);
+const b = new Decimal(0.2);
+a.plus(b).toNumber() === 0.3  // true
+```
+
+For invoices, a 1-paisa error due to float rounding can cause GST filing mismatches. Decimal.js eliminates this risk.
+
+*Source: backend/src/services/invoiceService.ts:1-5*
+
+## Invoice Data Model
+
+```typescript
+interface Invoice {
+  invoice_number: string;        // "INV-2026-001"
+  date: string;                  // "04/03/2026" (DD/MM/YYYY)
+  customer_name: string;
+  items: InvoiceItem[];
+  subtotal: number;              // Sum of all item amounts
+  cgst: number;                  // Central GST (9% for 18% total)
+  sgst: number;                  // State GST (9% for 18% total)
+  igst?: number;                 // Integrated GST (18%) for interstate
+  total: number;                 // subtotal + cgst + sgst + igst
+  business_name: string;
+  gst_number: string;            // "29XXXXX1234X1Z5"
+}
+
+interface InvoiceItem {
+  product_name: string;
+  quantity: number;
+  price: number;                 // Unit price
+  amount: number;                // quantity × price
+}
+```
+
+*Source: backend/src/schema (referenced in invoiceService.ts:2)*
+
+## Invoice Generation
+
+### generateInvoiceData Function
+
+Converts an `ExtractedChatOrder` into an `Invoice` object with GST calculations.
+
+```typescript
+export interface InvoiceOptions {
+  businessName?: string;
+  gstNumber?: string;
+  invoiceSequence: number;    // Required for sequential numbering
+  taxRatePercent?: number;    // Total tax rate (e.g., 18 for 18%)
+  isInterstate?: boolean;     // True = IGST, False = CGST + SGST
+}
+
+export const generateInvoiceData = (
+  order: ExtractedChatOrder,
+  options: InvoiceOptions
+): Invoice => {
+  const {
+    businessName = "Your Business Name",
+    gstNumber = "29XXXXX1234X1Z5",
+    invoiceSequence,
+    taxRatePercent = 18, // Default 18% GST
+    isInterstate = false,
+  } = options;
+
+  const date = new Date();
+  const dateStr = date.toLocaleDateString("en-IN", { 
+    day: "2-digit", month: "2-digit", year: "numeric" 
+  });
+  
+  // Sequential invoice numbering (e.g., INV-2026-001)
+  const year = date.getFullYear();
+  const seqStr = String(invoiceSequence).padStart(3, '0');
+  const invoice_number = `INV-${year}-${seqStr}`;
+
+  // ... (continued below)
+};
+```
+
+*Source: backend/src/services/invoiceService.ts:7-35*
+
+### Sequential Invoice Numbering
+
+Invoice numbers follow the format `INV-YYYY-XXX`:
+
+- **INV** — Prefix (customizable)
+- **YYYY** — Current year (2026)
+- **XXX** — Zero-padded sequence number (001, 002, ...)
+
+```typescript
+const year = date.getFullYear();
+const seqStr = String(invoiceSequence).padStart(3, '0');
+const invoice_number = `INV-${year}-${seqStr}`;
+```
+
+**Examples:**
+- `invoiceSequence: 1` → `INV-2026-001`
+- `invoiceSequence: 42` → `INV-2026-042`
+- `invoiceSequence: 1337` → `INV-2026-1337`
+
+<Warning>
+  The `invoiceSequence` must be managed by your application (e.g., stored in Redis or Postgres with auto-increment). The invoice service does NOT persist the sequence counter.
+</Warning>
+
+*Source: backend/src/services/invoiceService.ts:32-35*
+
+### Item Calculation
+
+Each order item is converted to an invoice line with precise amount calculation:
+
+```typescript
+let subtotal = new Decimal(0);
+
+const invoiceItems: InvoiceItem[] = order.items.map((item) => {
+  const price = new Decimal(item.price ?? 0);
+  const quantity = new Decimal(item.quantity);
+  const amount = price.times(quantity).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+
+  subtotal = subtotal.plus(amount);
+
+  return { 
+    product_name: item.product_name, 
+    quantity: item.quantity, 
+    price: price.toNumber(),
+    amount: amount.toNumber(),
+  };
+});
+```
+
+**Calculation steps:**
+1. Convert `price` and `quantity` to Decimal objects
+2. Multiply: `amount = price × quantity`
+3. Round to 2 decimal places using banker's rounding (ROUND_HALF_UP)
+4. Accumulate into `subtotal`
+
+*Source: backend/src/services/invoiceService.ts:40-53*
+
+### GST Calculation
+
+#### Intrastate (CGST + SGST)
+
+For transactions **within the same state**, GST is split equally between Central and State:
+
+```typescript
+const taxRate = new Decimal(taxRatePercent);  // 18
+let cgst = new Decimal(0);
+let sgst = new Decimal(0);
+let igst = new Decimal(0);
+
+if (isInterstate) {
+  igst = subtotal.times(taxRate).div(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+} else {
+  const halfRate = taxRate.div(2);  // 9
+  cgst = subtotal.times(halfRate).div(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+  sgst = subtotal.times(halfRate).div(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+}
+```
+
+**Example (18% GST, intrastate):**
+- Subtotal: ₹1000
+- CGST (9%): ₹90
+- SGST (9%): ₹90
+- **Total**: ₹1180
+
+*Source: backend/src/services/invoiceService.ts:56-67*
+
+#### Interstate (IGST)
+
+For transactions **across state borders**, IGST applies instead:
+
+```typescript
+if (isInterstate) {
+  igst = subtotal.times(taxRate).div(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+}
+```
+
+**Example (18% GST, interstate):**
+- Subtotal: ₹1000
+- IGST (18%): ₹180
+- CGST: ₹0
+- SGST: ₹0
+- **Total**: ₹1180
+
+*Source: backend/src/services/invoiceService.ts:61-62*
+
+### Final Invoice Object
+
+```typescript
+const total = subtotal.plus(cgst).plus(sgst).plus(igst);
+
+return {
+  invoice_number,
+  date: dateStr,
+  customer_name: order.customer_name || "Customer",
+  items: invoiceItems,
+  subtotal: subtotal.toNumber(),
+  cgst: cgst.toNumber(),
+  sgst: sgst.toNumber(),
+  igst: isInterstate ? igst.toNumber() : undefined,
+  total: total.toNumber(),
+  business_name: businessName,
+  gst_number: gstNumber,
+};
+```
+
+*Source: backend/src/services/invoiceService.ts:69-84*
+
+## Usage Example
+
+### Generate Invoice Data
+
+```typescript
+import { generateInvoiceData } from "./services/invoiceService";
+import { storage } from "./services/storageService";
+
+// 1. Fetch confirmed order
+const order = await storage.getChatOrder("org-123", "order-456");
+
+if (order.status !== "confirmed") {
+  throw new Error("Order must be confirmed before generating invoice");
+}
+
+// 2. Get next invoice sequence number (from Redis/Postgres)
+const invoiceSequence = await getNextInvoiceNumber("org-123");
+
+// 3. Generate invoice data
+const invoice = generateInvoiceData(order, {
+  businessName: "Acme Fruits & Vegetables",
+  gstNumber: "29ABCDE1234F1Z5",
+  invoiceSequence,
+  taxRatePercent: 18,
+  isInterstate: false,  // Intrastate → CGST + SGST
+});
+
+// 4. Invoice is ready for PDF generation or storage
+console.log(invoice);
+```
+
+**Output:**
+```json
+{
+  "invoice_number": "INV-2026-042",
+  "date": "04/03/2026",
+  "customer_name": "John Doe",
+  "items": [
+    {
+      "product_name": "mangoes",
+      "quantity": 5,
+      "price": 120,
+      "amount": 600
+    },
+    {
+      "product_name": "bananas",
+      "quantity": 2,
+      "price": 60,
+      "amount": 120
+    }
+  ],
+  "subtotal": 720,
+  "cgst": 64.8,
+  "sgst": 64.8,
+  "total": 849.6,
+  "business_name": "Acme Fruits & Vegetables",
+  "gst_number": "29ABCDE1234F1Z5"
+}
+```
+
+## PDF Generation (Future)
+
+The current service generates invoice **data objects**. PDF rendering is typically handled by:
+
+1. **Frontend** — Using libraries like `jspdf` or `react-pdf`
+2. **Backend** — Using `pdfkit`, `puppeteer`, or `wkhtmltopdf`
+
+### Example PDFKit Template (Backend)
+
+```typescript
+import PDFDocument from "pdfkit";
+import fs from "fs";
+
+function generateInvoicePDF(invoice: Invoice, outputPath: string) {
+  const doc = new PDFDocument({ margin: 50 });
+  doc.pipe(fs.createWriteStream(outputPath));
+
+  // Header
+  doc.fontSize(20).text(invoice.business_name, { align: "center" });
+  doc.fontSize(10).text(`GST: ${invoice.gst_number}`, { align: "center" });
+  doc.moveDown();
+
+  // Invoice details
+  doc.fontSize(12).text(`Invoice: ${invoice.invoice_number}`);
+  doc.text(`Date: ${invoice.date}`);
+  doc.text(`Customer: ${invoice.customer_name}`);
+  doc.moveDown();
+
+  // Items table
+  doc.fontSize(10);
+  invoice.items.forEach((item) => {
+    doc.text(
+      `${item.product_name} × ${item.quantity} @ ₹${item.price} = ₹${item.amount}`
+    );
+  });
+  doc.moveDown();
+
+  // Totals
+  doc.text(`Subtotal: ₹${invoice.subtotal}`);
+  if (invoice.cgst > 0) {
+    doc.text(`CGST (9%): ₹${invoice.cgst}`);
+    doc.text(`SGST (9%): ₹${invoice.sgst}`);
+  }
+  if (invoice.igst) {
+    doc.text(`IGST (18%): ₹${invoice.igst}`);
+  }
+  doc.fontSize(12).text(`Total: ₹${invoice.total}`, { underline: true });
+
+  doc.end();
+}
+
+// Usage
+const invoice = generateInvoiceData(order, options);
+generateInvoicePDF(invoice, "/tmp/invoice-INV-2026-042.pdf");
+```
+
+<Note>
+  PDFKit is not currently bundled in Chat2Cash backend. You'll need to install it separately: `npm install pdfkit @types/pdfkit`
+</Note>
+
+## Configuration
+
+### Environment Variables
+
+Invoice generation doesn't require environment variables, but you may want to configure defaults:
+
+```bash .env
+DEFAULT_BUSINESS_NAME="Your Business Name"
+DEFAULT_GST_NUMBER="29XXXXX1234X1Z5"
+DEFAULT_TAX_RATE=18
+```
+
+### Invoice Sequence Storage
+
+You must persist the invoice sequence counter. Recommended approaches:
+
+#### Option 1: Redis Atomic Counter
+
+```typescript
+import { redis } from "./config/redis";
+
+export async function getNextInvoiceNumber(orgId: string): Promise<number> {
+  const key = `invoice_seq:${orgId}:${new Date().getFullYear()}`;
+  const seq = await redis.incr(key);
+  
+  // Reset counter on Jan 1st (optional)
+  const ttl = await redis.ttl(key);
+  if (ttl === -1) {
+    const endOfYear = new Date(new Date().getFullYear() + 1, 0, 1);
+    const seconds = Math.floor((endOfYear.getTime() - Date.now()) / 1000);
+    await redis.expire(key, seconds);
+  }
+  
+  return seq;
+}
+```
+
+#### Option 2: Postgres Serial Column
+
+```sql
+CREATE TABLE invoices (
+  id SERIAL PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  invoice_number TEXT NOT NULL UNIQUE,
+  year INTEGER NOT NULL,
+  sequence INTEGER NOT NULL,
+  order_id UUID NOT NULL REFERENCES chat_orders(id),
+  data JSONB NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_invoices_org_year ON invoices(org_id, year);
+```
+
+```typescript
+export async function getNextInvoiceNumber(
+  orgId: string,
+  year: number
+): Promise<number> {
+  const result = await db.query(
+    `SELECT COALESCE(MAX(sequence), 0) + 1 AS next_seq 
+     FROM invoices 
+     WHERE org_id = $1 AND year = $2`,
+    [orgId, year]
+  );
+  return result.rows[0].next_seq;
+}
+```
+
+<Warning>
+  Do NOT generate invoice numbers client-side. Always use a server-side atomic counter to prevent duplicate invoice numbers.
+</Warning>
+
+## GST Compliance
+
+### Required Fields for GST Invoice
+
+According to GST rules, a tax invoice must contain:
+
+- ✅ Invoice number (sequential)
+- ✅ Invoice date
+- ✅ Supplier name and GSTIN
+- ✅ Customer name
+- ✅ Item description, quantity, unit price
+- ✅ Taxable value (subtotal)
+- ✅ GST rate and amount (CGST/SGST or IGST)
+- ✅ Total invoice value
+- ⚠️ Supplier address (not in current schema)
+- ⚠️ Customer GSTIN (for B2B, not in current schema)
+- ⚠️ Place of supply (not in current schema)
+
+<Info>
+  For B2C (business-to-consumer) transactions below ₹50,000, customer GSTIN is optional. Chat2Cash is designed for small businesses doing primarily B2C sales.
+</Info>
+
+### HSN/SAC Codes
+
+For GST filing, you may need to add HSN (Harmonized System of Nomenclature) codes for goods or SAC (Services Accounting Code) for services.
+
+**Example extension:**
+```typescript
+interface InvoiceItem {
+  product_name: string;
+  hsn_code?: string;  // e.g., "0804" for mangoes
+  quantity: number;
+  price: number;
+  amount: number;
+}
+```
+
+Refer to the [GST HSN code list](https://cbic-gst.gov.in/gst-goods-services-rates.html) for your products.
+
+## Edge Cases
+
+<AccordionGroup>
+  <Accordion title="Missing item prices">
+    If `item.price` is `null`, the service defaults to `0`. You should validate that all items have prices before generating an invoice:
+    
+    ```typescript
+    const missingPrices = order.items.filter(item => item.price == null);
+    if (missingPrices.length > 0) {
+      throw new Error("Cannot generate invoice: some items are missing prices");
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Zero-value invoices">
+    If the subtotal is ₹0, the invoice will have ₹0 GST and ₹0 total. This is technically valid but may be rejected by accounting software.
+  </Accordion>
+
+  <Accordion title="Rounding discrepancies">
+    Due to banker's rounding (ROUND_HALF_UP), there may be 1-paisa discrepancies when summing line items vs. calculating tax on the subtotal. The service prioritizes **subtotal-based tax calculation** to match GST rules.
+  </Accordion>
+
+  <Accordion title="Partial refunds">
+    The service does not handle credit notes or refunds. For partial refunds, you'll need to generate a separate credit note invoice with negative amounts.
+  </Accordion>
+</AccordionGroup>
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="Order Management" icon="list-check" href="/features/order-management">
+    Confirm orders before generating invoices
+  </Card>
+  <Card title="AI Extraction" icon="brain" href="/features/ai-extraction">
+    Extract order details from customer messages
+  </Card>
+</CardGroup>

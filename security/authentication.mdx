@@ -1,0 +1,227 @@
+---
+title: Authentication
+description: API key and JWT-based authentication with organization-scoped access control
+---
+
+Chat2Cash implements dual authentication modes for machine and human access, with built-in protection against timing attacks and automatic user provisioning.
+
+## Authentication Methods
+
+### API Key Authentication
+
+API keys provide stateless authentication for machine-to-machine communication. Keys are SHA-256 hashed and verified using constant-time comparison to prevent timing side-channel attacks.
+
+**Request:**
+```bash
+curl https://api.chat2cash.dev/api/orders \
+  -H "x-api-key: c2c_live_abc123xyz789"
+```
+
+**Implementation Details:**
+
+The authentication handler performs the following steps:
+
+1. **Hash the incoming key** using SHA-256
+2. **Query the database** by hash (indexed column for fast lookup)
+3. **Verify using `crypto.timingSafeEqual`** to prevent timing oracle attacks
+4. **Set `req.orgId`** from the API key's organization association
+
+```typescript
+// From authHandler.ts:29-53
+const incomingHash = crypto.createHash("sha256").update(apiKeyHeader).digest();
+const incomingHashHex = incomingHash.toString("hex");
+
+const result = await db
+  .select({ orgId: apiKeysTable.organizationId, keyHash: apiKeysTable.keyHash })
+  .from(apiKeysTable)
+  .where(and(eq(apiKeysTable.keyHash, incomingHashHex), eq(apiKeysTable.isActive, true)))
+  .limit(1);
+
+if (result.length === 0) throw new AppError("Invalid API Key", 401);
+
+// Constant-time comparison prevents timing side-channel attacks
+const storedHash = Buffer.from(result[0].keyHash, "hex");
+if (
+  storedHash.length !== incomingHash.length ||
+  !crypto.timingSafeEqual(incomingHash, storedHash)
+) {
+  throw new AppError("Invalid API Key", 401);
+}
+
+req.orgId = result[0].orgId;
+```
+
+### JWT Authentication
+
+JWT tokens enable human users to authenticate via Neon Auth. Tokens are verified using JWKS (JSON Web Key Set) and trigger just-in-time user provisioning.
+
+**Request:**
+```bash
+curl https://api.chat2cash.dev/api/orders \
+  -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+**JIT User Sync:**
+
+On first login, the system atomically upserts user records to prevent race conditions:
+
+```typescript
+// From authHandler.ts:64-85
+const { payload } = await jwtVerify(token, JWKS);
+
+const userId = payload.sub as string;
+const userEmail = payload.email as string;
+
+// Atomic JIT sync: upsert user in local DB on first login
+const [user] = await db
+  .insert(usersTable)
+  .values({
+    id: userId,
+    email: userEmail,
+    name: (payload.name as string) ?? "Unknown",
+  })
+  .onConflictDoUpdate({
+    target: usersTable.id,
+    set: {
+      email: userEmail,
+      name: (payload.name as string) ?? "Unknown",
+    },
+  })
+  .returning();
+
+req.user = user;
+
+if (req.user?.organizationId) {
+  req.orgId = req.user.organizationId;
+}
+```
+
+## Organization-Based Access Control
+
+All authenticated requests are scoped to an organization. The `req.orgId` field propagates throughout the request lifecycle for multi-tenant isolation.
+
+### Requiring Organization Membership
+
+Use the `requireOrg` middleware to enforce organization membership:
+
+```typescript
+// From authHandler.ts:106-111
+export const requireOrg = (req: Request, res: Response, next: NextFunction) => {
+  if (!req.orgId) {
+    return next(new AppError("User is not part of an Organization", 403));
+  }
+  next();
+};
+```
+
+**Example Route:**
+```typescript
+router.post("/orders/extract",
+  authHandler,
+  requireOrg,
+  extractLimiter,
+  async (req, res) => {
+    // req.orgId is guaranteed to be set here
+    const orders = await storage.getOrders(req.orgId!);
+    res.json(orders);
+  }
+);
+```
+
+## TypeScript Extensions
+
+The authentication middleware extends Express's `Request` interface:
+
+```typescript
+// From authHandler.ts:10-17
+declare global {
+  namespace Express {
+    interface Request {
+      user?: typeof usersTable.$inferSelect;
+      orgId?: string;
+    }
+  }
+}
+```
+
+This allows type-safe access to `req.user` and `req.orgId` throughout the application.
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Timing Attack Protection" icon="shield-halved">
+    Uses `crypto.timingSafeEqual` for constant-time hash comparison
+  </Card>
+  <Card title="Indexed Lookups" icon="magnifying-glass">
+    Queries by hash (indexed) to prevent full table scans
+  </Card>
+  <Card title="Atomic Upserts" icon="atom">
+    JIT user sync uses `onConflictDoUpdate` to prevent race conditions
+  </Card>
+  <Card title="Organization Isolation" icon="building">
+    All data access is scoped by `orgId` for multi-tenant security
+  </Card>
+</CardGroup>
+
+## Common Patterns
+
+### Accessing User Context
+
+```typescript
+if (req.user) {
+  // JWT-authenticated user
+  console.log(`User ${req.user.email} (${req.user.id})`);
+}
+
+if (req.orgId) {
+  // Either API key or JWT with org membership
+  const orders = await storage.getOrders(req.orgId);
+}
+```
+
+### Creating Protected Routes
+
+```typescript
+// Requires authentication (API key or JWT)
+router.get("/orders", authHandler, getOrders);
+
+// Requires authentication + organization membership
+router.post("/orders", authHandler, requireOrg, createOrder);
+
+// Requires authentication + org + rate limiting
+router.post("/extract", authHandler, requireOrg, extractLimiter, extractOrder);
+```
+
+## Error Responses
+
+**Missing Authentication:**
+```json
+{
+  "error": "Authentication required",
+  "statusCode": 401
+}
+```
+
+**Invalid API Key:**
+```json
+{
+  "error": "Invalid API Key",
+  "statusCode": 401
+}
+```
+
+**Invalid JWT:**
+```json
+{
+  "error": "Invalid or Expired Token",
+  "statusCode": 401
+}
+```
+
+**No Organization Membership:**
+```json
+{
+  "error": "User is not part of an Organization",
+  "statusCode": 403
+}
+```

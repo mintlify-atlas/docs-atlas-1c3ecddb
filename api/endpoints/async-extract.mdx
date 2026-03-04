@@ -1,0 +1,262 @@
+---
+title: "Queue Single Message Extraction"
+api: "POST /api/async/extract"
+description: "Queue a single message for asynchronous order extraction"
+---
+
+## Overview
+
+Queue a single message for background order extraction processing. This endpoint returns immediately with a job ID, allowing you to check the status later or receive results via webhook.
+
+Use this endpoint for high-volume processing, non-urgent extractions, or when you want to avoid blocking on AI processing time.
+
+## Authentication
+
+Requires a valid API key in the `Authorization` header:
+
+```
+Authorization: Bearer YOUR_API_KEY
+```
+
+## Rate Limiting
+
+This endpoint uses the extraction rate limiter. Limits vary by organization tier.
+
+## Idempotency
+
+Supports idempotency via the `Idempotency-Key` header to prevent duplicate job creation:
+
+```
+Idempotency-Key: async-order-789
+```
+
+## Request Body
+
+<ParamField body="message" type="string" required>
+  The text message containing order details to extract
+  
+  **Validation:**
+  - Must be at least 1 character long
+  - Required field
+</ParamField>
+
+<ParamField body="webhookUrl" type="string">
+  Optional webhook URL to receive results when processing completes
+  
+  **Webhook payload:**
+  - `POST` request sent to this URL when job completes
+  - Contains the full extracted order or error details
+  - Includes `jobId` and `status` fields
+</ParamField>
+
+## Response
+
+Returns immediately with `202 Accepted` status code and job information.
+
+<ResponseField name="status" type="string">
+  Job status (always `queued` on initial response)
+</ResponseField>
+
+<ResponseField name="jobId" type="string">
+  Unique identifier for the queued job
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="statusUrl" type="string">
+  URL path to check job status (relative path: `/api/jobs/{jobId}`)
+</ResponseField>
+
+## Example Request
+
+```bash
+curl -X POST https://api.chat2cash.com/api/async/extract \
+  -H "Authorization: Bearer c2c_your_api_key_here" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: async-2024-03-04-001" \
+  -d '{
+    "message": "Need 20 kg rice and 10 kg flour delivered to shop tomorrow",
+    "webhookUrl": "https://yourdomain.com/webhooks/order-extracted"
+  }'
+```
+
+## Example Response
+
+```json
+{
+  "status": "queued",
+  "jobId": "job_a1b2c3d4e5f6g7h8",
+  "message": "Order extraction queued for processing",
+  "statusUrl": "/api/jobs/job_a1b2c3d4e5f6g7h8"
+}
+```
+
+## Checking Job Status
+
+You can poll the job status endpoint to check processing progress:
+
+```bash
+curl https://api.chat2cash.com/api/jobs/job_a1b2c3d4e5f6g7h8 \
+  -H "Authorization: Bearer c2c_your_api_key_here"
+```
+
+### Job Status Response
+
+```json
+{
+  "jobId": "job_a1b2c3d4e5f6g7h8",
+  "state": "completed",
+  "progress": 100,
+  "result": {
+    "id": "ord_9k2j3h4g5f6d7s8a",
+    "customerName": null,
+    "items": [
+      {
+        "name": "rice",
+        "quantity": 20,
+        "unit": "kg",
+        "pricePerUnit": null,
+        "totalPrice": null
+      },
+      {
+        "name": "flour",
+        "quantity": 10,
+        "unit": "kg",
+        "pricePerUnit": null,
+        "totalPrice": null
+      }
+    ],
+    "totalAmount": null,
+    "currency": "INR",
+    "notes": "Deliver to shop tomorrow",
+    "rawMessage": "Need 20 kg rice and 10 kg flour delivered to shop tomorrow",
+    "confidence": 0.88,
+    "status": "pending",
+    "createdAt": "2026-03-04T12:15:00.000Z"
+  },
+  "createdAt": "2026-03-04T12:14:30.000Z",
+  "processedAt": "2026-03-04T12:15:00.000Z"
+}
+```
+
+## Server-Sent Events (SSE) Streaming
+
+For real-time job updates without polling, use the SSE endpoint:
+
+```bash
+curl -N https://api.chat2cash.com/api/jobs/job_a1b2c3d4e5f6g7h8/stream \
+  -H "Authorization: Bearer c2c_your_api_key_here"
+```
+
+The connection will receive `status` events as the job progresses and automatically close when complete.
+
+## Webhook Notification
+
+If you provided a `webhookUrl`, you'll receive a POST request when the job completes:
+
+```json
+{
+  "jobId": "job_a1b2c3d4e5f6g7h8",
+  "state": "completed",
+  "result": {
+    "id": "ord_9k2j3h4g5f6d7s8a",
+    "customerName": null,
+    "items": [
+      {
+        "name": "rice",
+        "quantity": 20,
+        "unit": "kg"
+      },
+      {
+        "name": "flour",
+        "quantity": 10,
+        "unit": "kg"
+      }
+    ],
+    "confidence": 0.88,
+    "status": "pending",
+    "createdAt": "2026-03-04T12:15:00.000Z"
+  }
+}
+```
+
+## Job States
+
+Jobs progress through the following states:
+
+- `queued` - Job is waiting in the queue
+- `active` - Job is currently being processed
+- `completed` - Job completed successfully (result available)
+- `failed` - Job failed (error details available)
+
+## Error Responses
+
+### 400 Bad Request
+
+Returned when the request body is invalid.
+
+```json
+{
+  "error": "Validation error",
+  "details": "Message is required"
+}
+```
+
+### 401 Unauthorized
+
+Returned when the API key is missing or invalid.
+
+```json
+{
+  "error": "Unauthorized",
+  "message": "Invalid or missing API key"
+}
+```
+
+### 429 Too Many Requests
+
+Returned when rate limits are exceeded.
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "message": "Too many extraction requests. Please try again later."
+}
+```
+
+### 500 Internal Server Error
+
+Returned when an unexpected error occurs.
+
+```json
+{
+  "error": "Internal server error",
+  "message": "Failed to queue extraction job"
+}
+```
+
+## Use Cases
+
+- **Batch Processing**: Queue multiple orders for background processing
+- **High Volume**: Handle peak loads without blocking client applications
+- **Webhook Integration**: Build event-driven workflows
+- **Non-Urgent Orders**: Process orders that don't need immediate response
+- **Long-Running Extractions**: Handle complex messages that may take longer to process
+
+## Best Practices
+
+- Use webhooks instead of polling when possible for better efficiency
+- Implement webhook endpoint with proper error handling and retries
+- Store the `jobId` to check status later if needed
+- Use idempotency keys to prevent duplicate job creation on retries
+- For chat conversations, use [/api/async/extract-order](/api/endpoints/async-extract-order) instead
+- For immediate results, use the synchronous [/api/extract](/api/endpoints/extract) endpoint
+
+## Webhook Requirements
+
+- Must be publicly accessible HTTPS endpoint
+- Should respond with 200-299 status code to acknowledge receipt
+- Will retry up to 3 times on failure with exponential backoff
+- Must accept POST requests with JSON payload

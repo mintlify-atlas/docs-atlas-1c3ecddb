@@ -1,0 +1,277 @@
+---
+title: 'API Overview'
+description: 'Chat2Cash REST API introduction, base URLs, response formats, and error handling'
+---
+
+## Introduction
+
+The Chat2Cash API enables you to extract structured order data from conversational messages, generate invoices, and manage orders programmatically. The API follows REST principles and returns JSON-encoded responses.
+
+## Base URL
+
+All API requests should be made to:
+
+```
+https://api.chat2cash.com/api
+```
+
+For local development:
+
+```
+http://localhost:3000/api
+```
+
+## Request Format
+
+All POST and PATCH requests must include a `Content-Type: application/json` header and send JSON-encoded bodies.
+
+```bash
+curl -X POST https://api.chat2cash.com/api/extract-order \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key_here" \
+  -d '{"messages": [{"sender": "customer", "text": "I need 5 bags of rice"}]}'
+```
+
+## Response Format
+
+All successful responses return JSON with the appropriate HTTP status code.
+
+### Success Response
+
+```json
+{
+  "id": "ord_1234567890",
+  "customer_name": "John Doe",
+  "items": [
+    {
+      "product_name": "Rice",
+      "quantity": 5,
+      "price": 50.00
+    }
+  ],
+  "total": 250.00,
+  "status": "pending",
+  "confidence": "high",
+  "created_at": "2026-03-04T10:30:00.000Z"
+}
+```
+
+### HTTP Status Codes
+
+| Status Code | Description |
+|-------------|-------------|
+| `200` | OK - Request succeeded |
+| `201` | Created - Resource successfully created |
+| `202` | Accepted - Async job queued (for `/async/*` endpoints) |
+| `400` | Bad Request - Invalid input or validation error |
+| `401` | Unauthorized - Missing or invalid authentication |
+| `403` | Forbidden - User not part of an organization |
+| `404` | Not Found - Resource doesn't exist |
+| `429` | Too Many Requests - Rate limit exceeded |
+| `500` | Internal Server Error - Something went wrong on our end |
+| `503` | Service Unavailable - Health check failed |
+
+## Error Handling
+
+When an error occurs, the API returns a JSON object with an `error` or `message` field describing the issue.
+
+### Error Response Structure
+
+```json
+{
+  "status": "error",
+  "message": "Error description"
+}
+```
+
+### Error Examples
+
+#### Authentication Error (401)
+
+```json
+{
+  "status": "error",
+  "message": "Invalid API Key"
+}
+```
+
+```json
+{
+  "status": "error",
+  "message": "Authentication required"
+}
+```
+
+#### Validation Error (400)
+
+```json
+{
+  "status": "error",
+  "message": "Validation Error",
+  "errors": [
+    {
+      "field": "messages",
+      "message": "At least one message is required"
+    }
+  ]
+}
+```
+
+#### Organization Required (403)
+
+```json
+{
+  "status": "error",
+  "message": "User is not part of an Organization"
+}
+```
+
+#### Resource Not Found (404)
+
+```json
+{
+  "status": "error",
+  "message": "Order not found"
+}
+```
+
+#### Rate Limit Exceeded (429)
+
+```json
+{
+  "error": "Rate limit exceeded. Your plan allows 20 requests per 15 minutes."
+}
+```
+
+#### Invalid JSON (400)
+
+```json
+{
+  "status": "error",
+  "message": "Invalid JSON payload"
+}
+```
+
+## Rate Limiting
+
+The API enforces rate limits based on your organization's tier:
+
+| Tier | Extract Endpoints | Read Endpoints | Window |
+|------|------------------|----------------|--------|
+| **Free** | 20 requests | 100 requests | 15 minutes |
+| **Pro** | 200 requests | 1,000 requests | 15 minutes |
+| **Enterprise** | 2,000 requests | 10,000 requests | 15 minutes |
+
+Rate limit information is included in response headers:
+
+```
+RateLimit-Limit: 20
+RateLimit-Remaining: 15
+RateLimit-Reset: 1709550600
+```
+
+## Pagination
+
+List endpoints support pagination using `limit` and `offset` query parameters.
+
+### Parameters
+
+- `limit` (integer): Number of items to return (default: 50, max: 100)
+- `offset` (integer): Number of items to skip (default: 0)
+
+### Example Request
+
+```bash
+curl -X GET "https://api.chat2cash.com/api/orders?limit=20&offset=40" \
+  -H "X-API-Key: your_api_key_here"
+```
+
+### Example Response
+
+```json
+[
+  {
+    "id": "ord_1234567890",
+    "customer_name": "John Doe",
+    "total": 250.00,
+    "status": "pending",
+    "created_at": "2026-03-04T10:30:00.000Z"
+  },
+  {
+    "id": "ord_0987654321",
+    "customer_name": "Jane Smith",
+    "total": 150.00,
+    "status": "confirmed",
+    "created_at": "2026-03-04T09:15:00.000Z"
+  }
+]
+```
+
+## Idempotency
+
+Write operations support idempotency to safely retry requests without duplicate processing. Include an `Idempotency-Key` header with a unique identifier:
+
+```bash
+curl -X POST https://api.chat2cash.com/api/extract-order \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key_here" \
+  -H "Idempotency-Key: unique-request-id-123" \
+  -d '{"messages": [{"sender": "customer", "text": "I need 5 bags of rice"}]}'
+```
+
+If you retry a request with the same `Idempotency-Key`, you'll receive the cached response from the original request instead of creating a duplicate resource.
+
+## Async Processing
+
+For long-running operations, use the `/async/*` endpoints. These return a `202 Accepted` response with a job ID:
+
+```bash
+curl -X POST https://api.chat2cash.com/api/async/extract-order \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key_here" \
+  -d '{"messages": [{"sender": "customer", "text": "I need 5 bags of rice"}]}'
+```
+
+### Response
+
+```json
+{
+  "status": "queued",
+  "jobId": "job_abc123xyz",
+  "message": "Chat order extraction queued for processing",
+  "statusUrl": "/api/jobs/job_abc123xyz"
+}
+```
+
+Poll the `statusUrl` or use the SSE endpoint `/api/jobs/{jobId}/stream` for real-time updates.
+
+## Health Check
+
+Check the API status and service health:
+
+```bash
+curl https://api.chat2cash.com/api/health
+```
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-03-04T10:30:00.000Z",
+  "services": {
+    "database": "connected",
+    "anthropic": "reachable",
+    "queue": "connected"
+  },
+  "latency_ms": 45,
+  "queue": {
+    "waiting": 2,
+    "active": 1,
+    "completed": 150,
+    "failed": 0
+  }
+}
+```
+
+No authentication required for the health endpoint.

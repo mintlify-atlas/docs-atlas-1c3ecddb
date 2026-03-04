@@ -1,0 +1,506 @@
+---
+title: Environment Variables
+description: Complete reference of all environment variables for Chat2Cash
+---
+
+## Overview
+
+Chat2Cash uses environment variables for configuration across all services. Variables are validated at startup using Zod schemas in `backend/src/config/env.ts`.
+
+## Core Configuration
+
+### NODE_ENV
+
+**Type**: `enum`  
+**Default**: `development`  
+**Values**: `development`, `production`, `test`
+
+**Description**: Sets the Node.js environment mode. Affects logging verbosity, error stack traces, and performance optimizations.
+
+**Example**:
+```yaml
+NODE_ENV: production
+```
+
+**Production Considerations**:
+- Always set to `production` in production environments
+- Enables optimizations like template caching and reduced logging
+- Hides detailed error stack traces from API responses
+
+### PORT
+
+**Type**: `string`  
+**Default**: `3000`
+
+**Description**: Port number for the API server to listen on.
+
+**Example**:
+```yaml
+PORT: 3000
+```
+
+**Production Considerations**:
+- Keep as `3000` for consistency with health checks
+- Use reverse proxy (nginx, Traefik) for external port mapping
+
+## Database Configuration
+
+### DATABASE_URL
+
+**Type**: `string` (URL format)  
+**Required**: Yes
+
+**Description**: PostgreSQL connection string for the database.
+
+**Format**:
+```
+postgres://[user]:[password]@[host]:[port]/[database]
+```
+
+**Example (Docker Compose)**:
+```yaml
+DATABASE_URL: postgres://user:password@db:5432/chat2cash
+```
+
+**Example (Neon Cloud)**:
+```yaml
+DATABASE_URL: postgres://user:password@ep-cool-darkness-123456.us-east-2.aws.neon.tech/chat2cash?sslmode=require
+```
+
+**Production Considerations**:
+- Use strong passwords (20+ characters, alphanumeric + symbols)
+- Enable SSL with `?sslmode=require` for cloud databases
+- Store credentials in secrets management (AWS Secrets Manager, HashiCorp Vault)
+- Set connection pool parameters: `?pool_timeout=30&max_connections=10`
+
+### DATABASE_CA_CERT
+
+**Type**: `string`  
+**Required**: No
+
+**Description**: Path to CA certificate for PostgreSQL SSL connections.
+
+**Example**:
+```yaml
+DATABASE_CA_CERT: /path/to/ca-certificate.crt
+```
+
+**Production Considerations**:
+- Required for self-signed SSL certificates
+- Cloud providers (Neon, RDS) often include CA certs automatically
+
+## Redis Configuration
+
+### REDIS_URL
+
+**Type**: `string` (URL format)  
+**Default**: `redis://localhost:6379`
+
+**Description**: Redis connection string for BullMQ job queue and rate limiting.
+
+**Format**:
+```
+redis://[password]@[host]:[port]/[database]
+```
+
+**Example (Docker Compose)**:
+```yaml
+REDIS_URL: redis://redis:6379
+```
+
+**Example (Redis Cloud)**:
+```yaml
+REDIS_URL: redis://:password@redis-12345.c1.us-east-1-2.ec2.cloud.redislabs.com:12345
+```
+
+**Production Considerations**:
+- Use password authentication for production Redis instances
+- Enable TLS with `rediss://` protocol for cloud Redis
+- Set database index if sharing Redis instance: `redis://redis:6379/1`
+
+## AI Configuration
+
+### ANTHROPIC_API_KEY
+
+**Type**: `string`  
+**Required**: Yes
+
+**Description**: API key for Anthropic Claude API (used for invoice extraction).
+
+**Example**:
+```yaml
+ANTHROPIC_API_KEY: sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+**Production Considerations**:
+- Never commit API keys to version control
+- Use environment-specific keys (dev, staging, prod)
+- Rotate keys every 90 days
+- Monitor usage at https://console.anthropic.com
+
+### AI_MODEL_FAST
+
+**Type**: `string`  
+**Default**: `claude-3-haiku-20240307`
+
+**Description**: Claude model for fast, low-cost extraction tasks (simple invoices).
+
+**Example**:
+```yaml
+AI_MODEL_FAST: claude-3-haiku-20240307
+```
+
+**Production Considerations**:
+- Haiku: ~$0.25 per 1M input tokens (cheapest)
+- Use for invoices with clear structure and minimal complexity
+
+### AI_MODEL_SMART
+
+**Type**: `string`  
+**Default**: `claude-3-5-sonnet-20241022`
+
+**Description**: Claude model for complex extraction tasks (multi-page invoices, OCR).
+
+**Example**:
+```yaml
+AI_MODEL_SMART: claude-3-5-sonnet-20241022
+```
+
+**Production Considerations**:
+- Sonnet 3.5: ~$3 per 1M input tokens (higher accuracy)
+- Use for invoices with poor scan quality or unusual formats
+- Consider Opus for maximum accuracy (higher cost)
+
+### AI_REQUEST_TIMEOUT_MS
+
+**Type**: `string` (milliseconds)  
+**Default**: `60000` (60 seconds)
+
+**Description**: Timeout for Anthropic API requests.
+
+**Example**:
+```yaml
+AI_REQUEST_TIMEOUT_MS: 90000  # 90 seconds
+```
+
+**Production Considerations**:
+- Increase for large multi-page invoices
+- Monitor average extraction time and adjust accordingly
+- Timeout should be less than load balancer timeout
+
+## Business Defaults
+
+### DEFAULT_BUSINESS_NAME
+
+**Type**: `string`  
+**Default**: `Chat2Cash Store`
+
+**Description**: Fallback business name when no `business_profile` exists in the database.
+
+**Example**:
+```yaml
+DEFAULT_BUSINESS_NAME: ACME Corporation
+```
+
+**Production Considerations**:
+- Set to your company name for initial setup
+- Users can override via `/api/business-profile` endpoint
+
+### DEFAULT_GST_NUMBER
+
+**Type**: `string`  
+**Default**: `22AAAAA0000A1Z5`
+
+**Description**: Fallback GST/tax number when no `business_profile` exists.
+
+**Example**:
+```yaml
+DEFAULT_GST_NUMBER: 29ABCDE1234F1Z5
+```
+
+**Production Considerations**:
+- Use a valid GST number format for your country
+- Indian GST format: 2 digits (state) + 10 alphanumeric + 1 letter + 1 digit + 1 letter
+
+## Rate Limiting
+
+### RATE_LIMIT_FREE
+
+**Type**: `string` (requests per window)  
+**Default**: `20`
+
+**Description**: Rate limit for free-tier users.
+
+**Example**:
+```yaml
+RATE_LIMIT_FREE: 50
+```
+
+### RATE_LIMIT_PRO
+
+**Type**: `string` (requests per window)  
+**Default**: `200`
+
+**Description**: Rate limit for pro-tier users.
+
+**Example**:
+```yaml
+RATE_LIMIT_PRO: 500
+```
+
+### RATE_LIMIT_ENTERPRISE
+
+**Type**: `string` (requests per window)  
+**Default**: `2000`
+
+**Description**: Rate limit for enterprise-tier users.
+
+**Example**:
+```yaml
+RATE_LIMIT_ENTERPRISE: 10000
+```
+
+### RATE_LIMIT_WINDOW_MS
+
+**Type**: `string` (milliseconds)  
+**Default**: `900000` (15 minutes)
+
+**Description**: Time window for rate limiting.
+
+**Example**:
+```yaml
+RATE_LIMIT_WINDOW_MS: 3600000  # 1 hour
+```
+
+**Production Considerations**:
+- Adjust limits based on infrastructure capacity
+- Monitor rate limit hits via Redis metrics
+- Implement graceful degradation (queue requests instead of 429 errors)
+
+## Authentication
+
+### NEON_AUTH_URL
+
+**Type**: `string` (URL format)  
+**Required**: Yes
+
+**Description**: Neon authentication server URL for JWT validation.
+
+**Example**:
+```yaml
+NEON_AUTH_URL: https://auth.neon.tech
+```
+
+**Production Considerations**:
+- Use production auth URL for live environments
+- Ensure network access from API servers to auth endpoint
+
+### NEON_JWKS_URL
+
+**Type**: `string` (URL format)  
+**Required**: Yes
+
+**Description**: JWKS (JSON Web Key Set) URL for verifying JWT signatures.
+
+**Example**:
+```yaml
+NEON_JWKS_URL: https://auth.neon.tech/.well-known/jwks.json
+```
+
+**Production Considerations**:
+- Cache JWKS responses to reduce auth server load
+- Implement retry logic for transient failures
+
+## Azure Storage
+
+### AZURE_STORAGE_ACCOUNT_NAME
+
+**Type**: `string`  
+**Required**: Yes
+
+**Description**: Azure Storage account name for invoice file storage.
+
+**Example**:
+```yaml
+AZURE_STORAGE_ACCOUNT_NAME: chat2cashstorage
+```
+
+### AZURE_STORAGE_ACCOUNT_KEY
+
+**Type**: `string`  
+**Required**: Yes
+
+**Description**: Azure Storage account access key.
+
+**Example**:
+```yaml
+AZURE_STORAGE_ACCOUNT_KEY: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+**Production Considerations**:
+- Rotate keys every 90 days
+- Use Azure Key Vault for key management
+- Consider SAS tokens for temporary access
+
+### AZURE_STORAGE_CONTAINER_NAME
+
+**Type**: `string`  
+**Default**: `invoices`
+
+**Description**: Azure Blob Storage container name for invoice uploads.
+
+**Example**:
+```yaml
+AZURE_STORAGE_CONTAINER_NAME: production-invoices
+```
+
+**Production Considerations**:
+- Use separate containers for dev/staging/prod
+- Enable soft delete for accidental deletions
+- Set lifecycle policies to archive old invoices
+
+## Monitoring & Observability
+
+### SENTRY_DSN
+
+**Type**: `string` (URL format)  
+**Required**: No
+
+**Description**: Sentry DSN for error tracking and monitoring.
+
+**Example**:
+```yaml
+SENTRY_DSN: https://examplePublicKey@o0.ingest.sentry.io/0
+```
+
+**Production Considerations**:
+- Create separate Sentry projects for dev/prod
+- Set appropriate sample rates to control costs
+- Configure alerts for critical errors
+
+### FRONTEND_URL
+
+**Type**: `string` (URL format)  
+**Required**: No
+
+**Description**: Frontend application URL for CORS configuration.
+
+**Example**:
+```yaml
+FRONTEND_URL: https://chat2cash.example.com
+```
+
+**Production Considerations**:
+- Set to production frontend domain
+- Supports multiple origins: `FRONTEND_URL: https://app1.com,https://app2.com`
+- Wildcard not supported for security reasons
+
+## Docker Compose Environment Variables
+
+### PostgreSQL Service
+
+```yaml
+POSTGRES_USER: user          # Database superuser
+POSTGRES_PASSWORD: password  # Superuser password
+POSTGRES_DB: chat2cash       # Initial database name
+```
+
+**Production Considerations**:
+- Change default credentials before deploying
+- Use PostgreSQL role-based access control (RBAC) for app users
+
+## Environment Variable Priority
+
+1. **Docker Compose file** (`docker-compose.yml`)
+2. **Shell environment** (`export VAR=value`)
+3. **`.env` file** (loaded by dotenv in Node.js)
+4. **Default values** (defined in `env.ts`)
+
+## Validation
+
+All environment variables are validated at startup using Zod:
+
+```typescript
+// backend/src/config/env.ts
+const envSchema = z.object({
+  PORT: z.string().default("3000"),
+  DATABASE_URL: z.string().url("DATABASE_URL must be a valid connection string"),
+  ANTHROPIC_API_KEY: z.string().min(1, "ANTHROPIC_API_KEY is required"),
+  // ...
+});
+```
+
+**If validation fails**:
+- Application exits with error message
+- Error details logged to console
+- Process exit code: 1
+
+## Example .env File
+
+```bash
+# Core Configuration
+NODE_ENV=production
+PORT=3000
+
+# Database
+DATABASE_URL=postgres://user:password@db:5432/chat2cash
+
+# Redis
+REDIS_URL=redis://redis:6379
+
+# AI
+ANTHROPIC_API_KEY=sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AI_MODEL_FAST=claude-3-haiku-20240307
+AI_MODEL_SMART=claude-3-5-sonnet-20241022
+AI_REQUEST_TIMEOUT_MS=60000
+
+# Business Defaults
+DEFAULT_BUSINESS_NAME=ACME Corporation
+DEFAULT_GST_NUMBER=29ABCDE1234F1Z5
+
+# Rate Limiting
+RATE_LIMIT_FREE=20
+RATE_LIMIT_PRO=200
+RATE_LIMIT_ENTERPRISE=2000
+RATE_LIMIT_WINDOW_MS=900000
+
+# Authentication
+NEON_AUTH_URL=https://auth.neon.tech
+NEON_JWKS_URL=https://auth.neon.tech/.well-known/jwks.json
+
+# Azure Storage
+AZURE_STORAGE_ACCOUNT_NAME=chat2cashstorage
+AZURE_STORAGE_ACCOUNT_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AZURE_STORAGE_CONTAINER_NAME=invoices
+
+# Monitoring
+SENTRY_DSN=https://examplePublicKey@o0.ingest.sentry.io/0
+FRONTEND_URL=https://chat2cash.example.com
+```
+
+## Security Best Practices
+
+1. **Never commit secrets to Git**
+   ```bash
+   echo ".env" >> .gitignore
+   ```
+
+2. **Use secrets management in production**
+   - AWS Secrets Manager
+   - HashiCorp Vault
+   - Kubernetes Secrets
+
+3. **Rotate credentials regularly**
+   - Database passwords: every 90 days
+   - API keys: every 90 days
+   - Azure Storage keys: every 90 days
+
+4. **Principle of least privilege**
+   - Database user should only have `SELECT`, `INSERT`, `UPDATE`, `DELETE` (no `DROP`)
+   - Azure Storage should use container-scoped SAS tokens when possible
+
+5. **Audit environment variables**
+   ```bash
+   # List all environment variables
+   docker compose exec api printenv | grep -v "PASSWORD\|KEY\|SECRET"
+   ```

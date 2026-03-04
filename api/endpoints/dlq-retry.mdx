@@ -1,0 +1,324 @@
+---
+title: "Retry Dead Letter Queue"
+description: "Retry failed jobs individually or in bulk"
+---
+
+## Endpoints
+
+### Retry Single Job
+
+```
+POST /api/admin/dlq/:jobId/retry
+```
+
+Retry a specific failed job from the Dead Letter Queue.
+
+### Retry All Failed Jobs
+
+```
+POST /api/admin/dlq/retry-all
+```
+
+Retry all failed jobs in the Dead Letter Queue in bulk.
+
+## Authentication
+
+Both endpoints require a valid Bearer token in the `Authorization` header.
+
+```bash
+Authorization: Bearer YOUR_API_KEY
+```
+
+<Warning>
+  These are admin endpoints. Ensure proper access controls are in place in production.
+</Warning>
+
+---
+
+## Retry Single Job
+
+### Path Parameters
+
+<ParamField path="jobId" type="string" required>
+  The unique identifier of the failed job to retry (from [DLQ List endpoint](/api/endpoints/dlq-list)).
+</ParamField>
+
+### Response
+
+<ResponseField name="message" type="string">
+  Success message confirming the retry.
+</ResponseField>
+
+<ResponseField name="jobId" type="string">
+  The ID of the retried job.
+</ResponseField>
+
+### Example Request
+
+```bash
+curl -X POST https://your-domain.com/api/admin/dlq/550e8400-e29b-41d4-a716-446655440000/retry \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+### Example Response
+
+```json
+{
+  "message": "Job retried successfully",
+  "jobId": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+### Error Responses
+
+<ResponseExample>
+```json Job Not Found
+{
+  "message": "Job not found or not in failed state",
+  "statusCode": 404
+}
+```
+</ResponseExample>
+
+### When to Use
+
+Retry individual jobs when:
+- You've identified and fixed the root cause of a specific failure
+- Testing a fix before bulk retry
+- The failure was transient (API timeout, temporary network issue)
+
+---
+
+## Retry All Failed Jobs
+
+### Response
+
+<ResponseField name="message" type="string">
+  Summary of the bulk retry operation.
+</ResponseField>
+
+<ResponseField name="count" type="number">
+  Number of jobs successfully queued for retry.
+</ResponseField>
+
+### Example Request
+
+```bash
+curl -X POST https://your-domain.com/api/admin/dlq/retry-all \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+### Example Response
+
+```json
+{
+  "message": "15 jobs retried",
+  "count": 15
+}
+```
+
+### When to Use
+
+Retry all jobs when:
+- A systemic issue has been resolved (e.g., Anthropic API was down, now back up)
+- Database maintenance is complete
+- Rate limits have reset
+- You've deployed a bug fix affecting multiple jobs
+
+<Warning>
+  This operation retries up to **1,000 jobs** at once. For larger DLQs, you may need multiple calls or manual intervention.
+</Warning>
+
+---
+
+## Retry Behavior
+
+<AccordionGroup>
+  <Accordion title="Retry Mechanics">
+    When a job is retried:
+    1. Job state is reset from `failed` to `waiting`
+    2. Attempt counter is reset to 0
+    3. Job is placed back in the extraction queue
+    4. Worker picks it up and processes normally
+    5. Same retry policy applies (3 attempts with exponential backoff)
+  </Accordion>
+  
+  <Accordion title="Retry Limits">
+    - **Per-job limit**: A retried job gets **3 fresh attempts**
+    - **No global limit**: You can retry the same job multiple times from DLQ
+    - **Rate limiting**: Retried jobs respect the 10-per-minute extraction rate limit
+  </Accordion>
+  
+  <Accordion title="Job Priority">
+    Retried jobs are processed with normal priority:
+    - Single message extractions: Priority 1
+    - Chat log extractions: Priority 2
+    
+    They queue behind any new incoming jobs with higher priority.
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+<Steps>
+  <Step title="Investigate Before Retry">
+    Use [DLQ List](/api/endpoints/dlq-list) to examine error messages. Don't blindly retry jobs with permanent failures (validation errors, etc.).
+  </Step>
+  
+  <Step title="Fix Root Cause">
+    Address the underlying issue before retrying:
+    - **API errors**: Check Anthropic API status, verify API key
+    - **Database errors**: Verify DB connection, check connection pool
+    - **Validation errors**: Fix input data or schema
+  </Step>
+  
+  <Step title="Test Single Job First">
+    Retry one job and verify success before bulk retry:
+    ```bash
+    # Retry one job
+    curl -X POST https://your-domain.com/api/admin/dlq/550e8400.../retry \
+      -H "Authorization: Bearer YOUR_API_KEY"
+    
+    # Check job status
+    curl -X GET https://your-domain.com/api/jobs/550e8400... \
+      -H "Authorization: Bearer YOUR_API_KEY"
+    ```
+  </Step>
+  
+  <Step title="Monitor After Retry">
+    Watch queue health after bulk retry:
+    ```bash
+    curl -X GET https://your-domain.com/api/queue/health \
+      -H "Authorization: Bearer YOUR_API_KEY"
+    ```
+    
+    Ensure jobs are being processed and not failing again.
+  </Step>
+</Steps>
+
+## JavaScript Examples
+
+### Retry Single Job
+
+```javascript
+const retryJob = async (jobId) => {
+  const response = await fetch(
+    `https://your-domain.com/api/admin/dlq/${jobId}/retry`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${YOUR_API_KEY}`
+      }
+    }
+  );
+  
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.message);
+  }
+  
+  const result = await response.json();
+  console.log(`✅ ${result.message}`);
+  return result;
+};
+
+retryJob('550e8400-e29b-41d4-a716-446655440000');
+```
+
+### Retry All Jobs
+
+```javascript
+const retryAllFailedJobs = async () => {
+  const response = await fetch(
+    'https://your-domain.com/api/admin/dlq/retry-all',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${YOUR_API_KEY}`
+      }
+    }
+  );
+  
+  const result = await response.json();
+  console.log(`✅ Retried ${result.count} jobs`);
+  
+  // Monitor queue health
+  const healthResponse = await fetch(
+    'https://your-domain.com/api/queue/health',
+    {
+      headers: { 'Authorization': `Bearer ${YOUR_API_KEY}` }
+    }
+  );
+  
+  const health = await healthResponse.json();
+  console.log('Queue health:', health);
+  
+  return result;
+};
+
+retryAllFailedJobs();
+```
+
+### Selective Retry by Error Type
+
+```javascript
+const retryTransientFailures = async () => {
+  // Fetch all failed jobs
+  const dlqResponse = await fetch(
+    'https://your-domain.com/api/admin/dlq?start=0&end=100',
+    {
+      headers: { 'Authorization': `Bearer ${YOUR_API_KEY}` }
+    }
+  );
+  
+  const { jobs } = await dlqResponse.json();
+  
+  // Filter for transient errors only
+  const transientErrors = [
+    'rate limit exceeded',
+    'timeout',
+    'service unavailable',
+    'connection',
+  ];
+  
+  const retriableJobs = jobs.filter(job => 
+    transientErrors.some(err => 
+      job.error.toLowerCase().includes(err)
+    )
+  );
+  
+  console.log(`Found ${retriableJobs.length} retriable jobs out of ${jobs.length} total`);
+  
+  // Retry each one
+  for (const job of retriableJobs) {
+    try {
+      await retryJob(job.jobId);
+      console.log(`✅ Retried ${job.jobId}`);
+    } catch (error) {
+      console.error(`❌ Failed to retry ${job.jobId}:`, error.message);
+    }
+  }
+};
+
+retryTransientFailures();
+```
+
+## Rate Limiting
+
+Both endpoints are subject to rate limiting:
+- **Limit**: 10 requests per minute per API key
+- **Quota**: Enforced via the `extractLimiter` middleware (same as extraction endpoints)
+
+## Notes
+
+<Info>
+  Retried jobs get a fresh set of 3 attempts. Monitor the [Job Status endpoint](/api/endpoints/job-status) or use [Job Stream](/api/endpoints/job-stream) to track progress.
+</Info>
+
+<Tip>
+  Set up a scheduled job to automatically retry transient failures (API timeouts, temporary network issues) after a cooling-off period.
+</Tip>
+
+<Warning>
+  Avoid retrying jobs with permanent failures (validation errors, invalid data) as they will fail again and waste resources. Filter by error type before bulk retry.
+</Warning>

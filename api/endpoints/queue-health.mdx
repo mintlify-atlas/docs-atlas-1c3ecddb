@@ -1,0 +1,246 @@
+---
+title: "Queue Health"
+description: "Get queue metrics and health statistics"
+---
+
+## Endpoint
+
+```
+GET /api/queue/health
+```
+
+Retrieve current health metrics and statistics for the BullMQ job queues (extraction and webhook delivery).
+
+## Authentication
+
+Requires a valid Bearer token in the `Authorization` header.
+
+```bash
+Authorization: Bearer YOUR_API_KEY
+```
+
+## Response
+
+<ResponseField name="extraction" type="object">
+  Metrics for the order extraction queue.
+  
+  <Expandable title="extraction properties">
+    <ResponseField name="waiting" type="number">
+      Number of jobs waiting to be processed.
+    </ResponseField>
+    
+    <ResponseField name="active" type="number">
+      Number of jobs currently being processed (max 3 concurrent).
+    </ResponseField>
+    
+    <ResponseField name="completed" type="number">
+      Number of successfully completed jobs (last 24 hours).
+    </ResponseField>
+    
+    <ResponseField name="failed" type="number">
+      Number of failed jobs in the dead letter queue.
+    </ResponseField>
+    
+    <ResponseField name="delayed" type="number">
+      Number of jobs delayed due to rate limiting or backoff.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="webhook" type="object">
+  Metrics for the webhook delivery queue.
+  
+  <Expandable title="webhook properties">
+    <ResponseField name="waiting" type="number">
+      Number of webhook deliveries waiting to be sent.
+    </ResponseField>
+    
+    <ResponseField name="active" type="number">
+      Number of webhook deliveries in progress (max 5 concurrent).
+    </ResponseField>
+    
+    <ResponseField name="failed" type="number">
+      Number of failed webhook deliveries.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Example Request
+
+```bash
+curl -X GET https://your-domain.com/api/queue/health \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+## Example Response
+
+```json
+{
+  "extraction": {
+    "waiting": 12,
+    "active": 3,
+    "completed": 847,
+    "failed": 2,
+    "delayed": 0
+  },
+  "webhook": {
+    "waiting": 5,
+    "active": 2,
+    "failed": 0
+  }
+}
+```
+
+## Queue Configurations
+
+### Extraction Queue
+
+- **Concurrency**: 3 workers (processes up to 3 jobs in parallel)
+- **Rate Limit**: 10 jobs per minute (respects Anthropic API limits)
+- **Retries**: 3 attempts with exponential backoff (3s, 9s, 27s)
+- **Retention**: 
+  - Completed jobs: 24 hours
+  - Failed jobs: Kept indefinitely in DLQ
+
+### Webhook Queue
+
+- **Concurrency**: 5 workers
+- **Retries**: 10 attempts with exponential backoff (5s, 15s, 45s...)
+- **Timeout**: 10 seconds per delivery attempt
+- **Retention**:
+  - Completed: 24 hours
+  - Failed: 72 hours
+
+## Health Monitoring
+
+Use this endpoint to monitor queue health in your observability stack:
+
+```javascript
+const checkQueueHealth = async () => {
+  const response = await fetch(
+    'https://your-domain.com/api/queue/health',
+    {
+      headers: { 'Authorization': `Bearer ${YOUR_API_KEY}` }
+    }
+  );
+  
+  const health = await response.json();
+  
+  // Alert if too many jobs are waiting
+  if (health.extraction.waiting > 50) {
+    console.warn('⚠️ High extraction queue backlog');
+  }
+  
+  // Alert if jobs are failing
+  if (health.extraction.failed > 10) {
+    console.error('❌ Many failed jobs in DLQ');
+  }
+  
+  // Check if workers are processing
+  if (health.extraction.waiting > 0 && health.extraction.active === 0) {
+    console.error('🚨 Workers may be stuck!');
+  }
+  
+  return health;
+};
+```
+
+## Metrics Interpretation
+
+<AccordionGroup>
+  <Accordion title="Waiting Jobs">
+    Jobs queued but not yet being processed. A high number indicates:
+    - High request volume
+    - Rate limiting in effect
+    - Workers are busy processing other jobs
+    
+    **Normal range**: 0-20 jobs
+    
+    **Action needed if**: > 50 jobs consistently
+  </Accordion>
+  
+  <Accordion title="Active Jobs">
+    Jobs currently being processed by workers.
+    
+    **Extraction queue**: Max 3 concurrent jobs
+    
+    **Webhook queue**: Max 5 concurrent jobs
+    
+    **Alert if**: Active count is 0 but waiting > 0 (workers may be stuck)
+  </Accordion>
+  
+  <Accordion title="Completed Jobs">
+    Successfully processed jobs in the last 24 hours.
+    
+    **Note**: This counter resets as old jobs are automatically cleaned up.
+  </Accordion>
+  
+  <Accordion title="Failed Jobs">
+    Jobs that failed after all retry attempts. These are moved to the Dead Letter Queue (DLQ).
+    
+    **Action needed**: Review failed jobs via [DLQ List endpoint](/api/endpoints/dlq-list) and retry if appropriate.
+  </Accordion>
+  
+  <Accordion title="Delayed Jobs">
+    Jobs scheduled for delayed execution due to:
+    - Rate limiting (max 10 extractions per minute)
+    - Exponential backoff after failures
+    
+    **Normal behavior**: Temporary delays during high traffic
+  </Accordion>
+</AccordionGroup>
+
+## Prometheus Metrics Example
+
+Integrate with Prometheus for monitoring:
+
+```javascript
+const { register, Gauge } = require('prom-client');
+
+const queueWaitingGauge = new Gauge({
+  name: 'bullmq_extraction_waiting',
+  help: 'Number of waiting extraction jobs'
+});
+
+const queueFailedGauge = new Gauge({
+  name: 'bullmq_extraction_failed',
+  help: 'Number of failed extraction jobs'
+});
+
+const updateQueueMetrics = async () => {
+  const response = await fetch(
+    'https://your-domain.com/api/queue/health',
+    {
+      headers: { 'Authorization': `Bearer ${YOUR_API_KEY}` }
+    }
+  );
+  
+  const health = await response.json();
+  
+  queueWaitingGauge.set(health.extraction.waiting);
+  queueFailedGauge.set(health.extraction.failed);
+};
+
+// Update metrics every 30 seconds
+setInterval(updateQueueMetrics, 30000);
+```
+
+## Rate Limiting
+
+This endpoint is subject to rate limiting:
+- **Limit**: 20 requests per minute per API key
+- **Quota**: Enforced via the `generalLimiter` middleware
+
+## Notes
+
+<Info>
+  Queue health metrics are fetched in real-time from Redis. The response time is typically under 50ms.
+</Info>
+
+<Tip>
+  Set up automated alerts for queue health to catch issues before they impact users. Monitor `failed` count and `waiting` backlog.
+</Tip>
+
+<Warning>
+  High failed job counts indicate systemic issues (API errors, database problems, etc.). Investigate via the [DLQ endpoints](/api/endpoints/dlq-list) before retrying.
+</Warning>

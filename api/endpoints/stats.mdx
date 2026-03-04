@@ -1,0 +1,274 @@
+---
+title: "Organization Statistics"
+description: "Get aggregate statistics for your organization"
+---
+
+## Endpoint
+
+```
+GET /api/stats
+```
+
+Retrieve aggregated statistics for your organization, including order counts by status and total revenue.
+
+## Authentication
+
+Requires a valid Bearer token in the `Authorization` header.
+
+```bash
+Authorization: Bearer YOUR_API_KEY
+```
+
+## Response
+
+<ResponseField name="total_orders" type="number">
+  Total number of orders across all statuses.
+</ResponseField>
+
+<ResponseField name="pending_orders" type="number">
+  Number of orders with `pending` status (awaiting confirmation).
+</ResponseField>
+
+<ResponseField name="confirmed_orders" type="number">
+  Number of orders with `confirmed` status (ready for fulfillment).
+</ResponseField>
+
+<ResponseField name="total_revenue" type="number">
+  Sum of all order totals in your organization's currency. Includes all orders regardless of status.
+</ResponseField>
+
+## Example Request
+
+```bash
+curl -X GET https://your-domain.com/api/stats \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+## Example Response
+
+```json
+{
+  "total_orders": 1247,
+  "pending_orders": 23,
+  "confirmed_orders": 1189,
+  "total_revenue": 2847536.50
+}
+```
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Dashboard Widgets" icon="chart-line">
+    Display key metrics on your admin dashboard or analytics page.
+  </Card>
+  
+  <Card title="Business Intelligence" icon="chart-pie">
+    Feed data into your BI tools for reporting and analysis.
+  </Card>
+  
+  <Card title="Health Monitoring" icon="heart-pulse">
+    Track pending order backlog and alert on anomalies.
+  </Card>
+  
+  <Card title="Revenue Tracking" icon="indian-rupee-sign">
+    Monitor cumulative revenue in real-time.
+  </Card>
+</CardGroup>
+
+## JavaScript Example
+
+```javascript
+const fetchOrgStats = async () => {
+  const response = await fetch(
+    'https://your-domain.com/api/stats',
+    {
+      headers: {
+        'Authorization': `Bearer ${YOUR_API_KEY}`
+      }
+    }
+  );
+  
+  if (!response.ok) {
+    throw new Error('Failed to fetch statistics');
+  }
+  
+  const stats = await response.json();
+  
+  console.log(`📊 Total Orders: ${stats.total_orders}`);
+  console.log(`⏳ Pending: ${stats.pending_orders}`);
+  console.log(`✅ Confirmed: ${stats.confirmed_orders}`);
+  console.log(`💰 Revenue: ₹${stats.total_revenue.toLocaleString('en-IN')}`);
+  
+  return stats;
+};
+
+fetchOrgStats();
+```
+
+## React Component Example
+
+```jsx
+import { useEffect, useState } from 'react';
+
+const StatsWidget = () => {
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const response = await fetch(
+          'https://your-domain.com/api/stats',
+          {
+            headers: {
+              'Authorization': `Bearer ${YOUR_API_KEY}`
+            }
+          }
+        );
+        const data = await response.json();
+        setStats(data);
+      } catch (error) {
+        console.error('Failed to load stats:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchStats();
+    
+    // Refresh every 5 minutes
+    const interval = setInterval(fetchStats, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (loading) return <div>Loading...</div>;
+  if (!stats) return <div>Failed to load statistics</div>;
+
+  return (
+    <div className="stats-grid">
+      <div className="stat-card">
+        <h3>Total Orders</h3>
+        <p className="stat-value">{stats.total_orders.toLocaleString()}</p>
+      </div>
+      
+      <div className="stat-card">
+        <h3>Pending</h3>
+        <p className="stat-value pending">{stats.pending_orders}</p>
+      </div>
+      
+      <div className="stat-card">
+        <h3>Confirmed</h3>
+        <p className="stat-value confirmed">{stats.confirmed_orders}</p>
+      </div>
+      
+      <div className="stat-card">
+        <h3>Total Revenue</h3>
+        <p className="stat-value revenue">
+          ₹{stats.total_revenue.toLocaleString('en-IN', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+          })}
+        </p>
+      </div>
+    </div>
+  );
+};
+```
+
+## Monitoring & Alerting
+
+Set up automated alerts based on statistics:
+
+```javascript
+const monitorStats = async () => {
+  const response = await fetch(
+    'https://your-domain.com/api/stats',
+    {
+      headers: { 'Authorization': `Bearer ${YOUR_API_KEY}` }
+    }
+  );
+  
+  const stats = await response.json();
+  
+  // Alert if pending orders exceed threshold
+  if (stats.pending_orders > 50) {
+    console.warn(`⚠️ High pending order count: ${stats.pending_orders}`);
+    // Send alert to ops team
+  }
+  
+  // Alert if pending ratio is too high
+  const pendingRatio = stats.pending_orders / stats.total_orders;
+  if (pendingRatio > 0.1) {
+    console.warn(`⚠️ ${(pendingRatio * 100).toFixed(1)}% of orders are pending`);
+  }
+  
+  // Track revenue milestones
+  if (stats.total_revenue > 1000000) {
+    console.log('🎉 Revenue exceeded ₹10 Lakhs!');
+  }
+  
+  return stats;
+};
+
+// Run every hour
+setInterval(monitorStats, 60 * 60 * 1000);
+```
+
+## Calculated Metrics
+
+Derive additional insights from the statistics:
+
+```javascript
+const analyzeStats = (stats) => {
+  const insights = {
+    // Confirmation rate
+    confirmationRate: (stats.confirmed_orders / stats.total_orders * 100).toFixed(1),
+    
+    // Average order value
+    averageOrderValue: (stats.total_revenue / stats.total_orders).toFixed(2),
+    
+    // Pending backlog percentage
+    pendingBacklog: (stats.pending_orders / stats.total_orders * 100).toFixed(1),
+    
+    // Orders with other statuses (cancelled, etc.)
+    otherOrders: stats.total_orders - stats.pending_orders - stats.confirmed_orders
+  };
+  
+  console.log(`✅ Confirmation Rate: ${insights.confirmationRate}%`);
+  console.log(`💵 Avg Order Value: ₹${insights.averageOrderValue}`);
+  console.log(`⏳ Pending Backlog: ${insights.pendingBacklog}%`);
+  console.log(`📋 Other Status: ${insights.otherOrders} orders`);
+  
+  return insights;
+};
+```
+
+## Performance
+
+- **Response Time**: Typically < 50ms
+- **Caching**: Not cached (real-time data)
+- **Load**: Lightweight aggregation queries optimized with database indexes
+
+<Tip>
+  For high-traffic dashboards, consider caching this response client-side and refreshing every 1-5 minutes rather than on every page load.
+</Tip>
+
+## Rate Limiting
+
+This endpoint is subject to rate limiting:
+- **Limit**: 20 requests per minute per API key
+- **Quota**: Enforced via the `generalLimiter` middleware
+
+## Notes
+
+<Info>
+  All statistics are scoped to your organization. Multi-tenant isolation ensures you only see data for your own org.
+</Info>
+
+<Note>
+  Revenue includes orders of all statuses. For confirmed-only revenue, calculate: `confirmed_orders * average_order_value` (estimate) or fetch individual orders and sum.
+</Note>
+
+<Warning>
+  This endpoint returns raw aggregate numbers. PII redaction does not apply as no individual order details are exposed.
+</Warning>

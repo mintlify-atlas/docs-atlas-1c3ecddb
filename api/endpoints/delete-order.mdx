@@ -1,0 +1,96 @@
+---
+title: "Delete Order"
+api: "DELETE /api/orders/:id"
+description: "Soft delete an order (marks as deleted without removing from database)"
+---
+
+## Authentication
+
+Requires a valid API key in the `Authorization` header.
+
+## Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique identifier of the order to delete
+</ParamField>
+
+## Response
+
+Returns a success confirmation when the order is marked as deleted.
+
+<ResponseField name="success" type="boolean">
+  Indicates whether the deletion was successful (always `true` on success)
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Confirmation message
+</ResponseField>
+
+## Soft Delete Behavior
+
+This endpoint performs a **soft delete**, which means:
+
+- The order is marked as deleted in the database (sets `deletedAt` timestamp)
+- The order data is preserved for audit and recovery purposes
+- The order will no longer appear in list or get operations
+- The order cannot be restored via the API (requires database access)
+
+<Warning>
+  Deleted orders cannot be restored through the API. Contact support if you need to recover a deleted order.
+</Warning>
+
+<RequestExample>
+```bash cURL
+curl -X DELETE "https://api.chat2cash.ai/api/orders/ord_7f8a9b2c3d4e5f6g7h8i9j0k" \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+```javascript Node.js
+const orderId = 'ord_7f8a9b2c3d4e5f6g7h8i9j0k';
+
+const response = await fetch(`https://api.chat2cash.ai/api/orders/${orderId}`, {
+  method: 'DELETE',
+  headers: {
+    'Authorization': 'Bearer YOUR_API_KEY'
+  }
+});
+
+const result = await response.json();
+console.log(result);
+```
+
+```python Python
+import requests
+
+order_id = 'ord_7f8a9b2c3d4e5f6g7h8i9j0k'
+
+response = requests.delete(
+    f'https://api.chat2cash.ai/api/orders/{order_id}',
+    headers={'Authorization': 'Bearer YOUR_API_KEY'}
+)
+
+result = response.json()
+print(result)
+```
+</RequestExample>
+
+<ResponseExample>
+```json 200 - Success
+{
+  "success": true,
+  "message": "Order deleted successfully"
+}
+```
+
+```json 404 - Not Found
+{
+  "error": "Order not found or already deleted"
+}
+```
+
+```json 401 - Unauthorized
+{
+  "error": "Invalid or missing API key"
+}
+```
+</ResponseExample>

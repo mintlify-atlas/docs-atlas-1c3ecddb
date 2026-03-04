@@ -1,0 +1,172 @@
+---
+title: "Generate Invoice"
+description: "Generate a GST-compliant PDF invoice for an order"
+---
+
+## Endpoint
+
+```
+POST /api/generate-invoice
+```
+
+Generates a GST-compliant invoice for a confirmed order, creates a PDF file, and uploads it to Azure Blob Storage.
+
+## Authentication
+
+Requires a valid Bearer token in the `Authorization` header.
+
+```bash
+Authorization: Bearer YOUR_API_KEY
+```
+
+## Request Body
+
+<ParamField body="orderId" type="string" required>
+  The unique identifier of the order to generate an invoice for.
+</ParamField>
+
+## Headers
+
+<ParamField header="Idempotency-Key" type="string">
+  Optional idempotency key to prevent duplicate invoice generation. If provided, subsequent requests with the same key will return the cached response.
+</ParamField>
+
+## Response
+
+<ResponseField name="message" type="string">
+  Success message indicating invoice generation status.
+</ResponseField>
+
+<ResponseField name="invoice" type="object">
+  The generated invoice object.
+  
+  <Expandable title="invoice properties">
+    <ResponseField name="invoice_number" type="string">
+      Sequential invoice number (e.g., "INV-2024-0001").
+    </ResponseField>
+    
+    <ResponseField name="invoice_date" type="string">
+      ISO 8601 timestamp of invoice generation.
+    </ResponseField>
+    
+    <ResponseField name="customer_name" type="string">
+      Customer name from the order.
+    </ResponseField>
+    
+    <ResponseField name="items" type="array">
+      Array of invoice line items.
+    </ResponseField>
+    
+    <ResponseField name="subtotal" type="number">
+      Subtotal before tax.
+    </ResponseField>
+    
+    <ResponseField name="tax_amount" type="number">
+      GST tax amount.
+    </ResponseField>
+    
+    <ResponseField name="total" type="number">
+      Total amount including tax.
+    </ResponseField>
+    
+    <ResponseField name="gst_number" type="string">
+      Business GST registration number.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="downloadEndpoint" type="string">
+  API endpoint to download the generated PDF invoice.
+</ResponseField>
+
+## Example Request
+
+```bash
+curl -X POST https://your-domain.com/api/generate-invoice \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: unique-key-123" \
+  -d '{
+    "orderId": "cm59h2c4y000008l31y4q8bqz"
+  }'
+```
+
+## Example Response
+
+```json
+{
+  "message": "Invoice generated successfully",
+  "invoice": {
+    "invoice_number": "INV-2024-0042",
+    "invoice_date": "2024-03-04T10:30:00.000Z",
+    "customer_name": "Rajesh Kumar",
+    "customer_phone": "+91-9876543210",
+    "items": [
+      {
+        "name": "Wireless Mouse",
+        "quantity": 2,
+        "unit_price": 599.00,
+        "total": 1198.00
+      },
+      {
+        "name": "USB Cable",
+        "quantity": 3,
+        "unit_price": 149.00,
+        "total": 447.00
+      }
+    ],
+    "subtotal": 1645.00,
+    "tax_rate": 18,
+    "tax_amount": 296.10,
+    "total": 1941.10,
+    "business_name": "Tech Solutions Pvt Ltd",
+    "gst_number": "29ABCDE1234F1Z5"
+  },
+  "downloadEndpoint": "/api/orders/cm59h2c4y000008l31y4q8bqz/download"
+}
+```
+
+## Error Responses
+
+<ResponseExample>
+```json Order Not Found
+{
+  "error": "Order not found",
+  "statusCode": 404
+}
+```
+
+```json Missing Order ID
+{
+  "error": "Order ID is required",
+  "statusCode": 400
+}
+```
+
+```json Generation Failed
+{
+  "error": "Failed to generate invoice",
+  "statusCode": 500
+}
+```
+</ResponseExample>
+
+## Notes
+
+<Note>
+  Invoice numbers are automatically assigned in sequential order per organization. The sequence is managed at the database level to prevent duplicates.
+</Note>
+
+<Warning>
+  Ensure the order exists and belongs to your organization before generating an invoice. The order must be in a valid state.
+</Warning>
+
+## Rate Limiting
+
+This endpoint is subject to rate limiting:
+- **Limit**: 10 requests per minute per API key
+- **Quota**: Enforced via the `extractLimiter` middleware
+
+## Idempotency
+
+This endpoint supports idempotency. Include an `Idempotency-Key` header to safely retry requests without creating duplicate invoices. The same key will return the cached response for 24 hours.

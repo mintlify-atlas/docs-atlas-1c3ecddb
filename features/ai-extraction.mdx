@@ -1,0 +1,497 @@
+---
+title: "AI Extraction"
+description: "Claude 3.5 Sonnet integration for order extraction from messages and chats"
+---
+
+## Overview
+
+Chat2Cash uses **Claude 3.5 Sonnet** via Anthropic's SDK to extract structured order data from unstructured text — including Hinglish (Hindi + English code-mixed) conversations. The system uses tool calling for structured output, token-based sliding windows to handle long conversations, and exponential backoff retry logic.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Hinglish Understanding" icon="language">
+    Native support for Hindi-English code-mixed text
+  </Card>
+  <Card title="Token Counting" icon="calculator">
+    Precise token estimation using cl100k_base
+  </Card>
+  <Card title="Sliding Window" icon="window-maximize">
+    Automatic context trimming for long chats
+  </Card>
+  <Card title="Retry Logic" icon="rotate">
+    Exponential backoff with jitter and rate limit handling
+  </Card>
+</CardGroup>
+
+## Architecture
+
+### Token Counting with cl100k_base
+
+The service uses `js-tiktoken` with the `cl100k_base` encoding to count tokens accurately. This is critical for Hinglish text where Devanagari characters consume 2-3× more tokens per character than ASCII.
+
+```typescript
+import { getEncoding, type Tiktoken } from "js-tiktoken";
+
+let _encoder: Tiktoken | null = null;
+function getEncoder(): Tiktoken {
+  if (!_encoder) _encoder = getEncoding("cl100k_base");
+  return _encoder;
+}
+
+function countTokens(text: string): number {
+  return getEncoder().encode(text).length;
+}
+```
+
+**Why cl100k_base?**
+
+> cl100k_base is the closest public approximation to Claude's BPE tokenizer. It consistently handles multi-byte scripts (Devanagari, Arabic, CJK) which can consume 2-3× more tokens per character than ASCII — the root cause of accidental Token Limit Exceeded errors on Hinglish conversations.
+
+*Source: backend/src/services/anthropicService.ts:10-14*
+
+### Sliding Window Context Management
+
+When processing long chat histories, the service automatically trims messages to fit within the token budget using a sliding window approach.
+
+```typescript
+function applySlidingWindow(
+  messages: ChatMessage[], 
+  maxTokens: number = 8000
+): ChatMessage[] {
+  let currentTokens = 0;
+  const pruned: ChatMessage[] = [];
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    // Approximate the wire format seen by the model: "sender: text\n"
+    const line = `${messages[i].sender}: ${messages[i].text}\n`;
+    const lineTokens = countTokens(line);
+    if (currentTokens + lineTokens > maxTokens) break;
+    currentTokens += lineTokens;
+    pruned.unshift(messages[i]);
+  }
+
+  log(`applySlidingWindow: kept ${pruned.length}/${messages.length} messages (~${currentTokens} tokens)`, "anthropic");
+  return pruned;
+}
+```
+
+**How it works:**
+1. Starts from the **most recent** message (bottom of chat)
+2. Counts tokens for each message in `sender: text` format
+3. Stops when adding the next message would exceed `maxTokens`
+4. Returns the trimmed message array
+
+*Source: backend/src/services/anthropicService.ts:49-64*
+
+<Note>
+  The token budget is set 20% below the character-equivalent to leave headroom for the system prompt and output tokens.
+</Note>
+
+## API Integration
+
+### Configuration
+
+The service is configured via environment variables:
+
+```typescript
+const DEFAULT_MODEL_STR = env.AI_MODEL_SMART; // claude-3-5-sonnet-20241022
+const CHAT_EXTRACT_MODEL = env.AI_MODEL_SMART;
+const REQUEST_TIMEOUT_MS = parseInt(env.AI_REQUEST_TIMEOUT_MS);
+const MAX_RETRIES = 3;
+const INITIAL_RETRY_DELAY = 2000;
+const MAX_RETRY_DELAY = 10000;
+
+const anthropic = new Anthropic({
+  apiKey: env.ANTHROPIC_API_KEY,
+  timeout: REQUEST_TIMEOUT_MS,
+});
+```
+
+*Source: backend/src/services/anthropicService.ts:25-36*
+
+### Tool Calling for Structured Output
+
+Chat2Cash uses Anthropic's **tool calling** feature to enforce structured JSON output. This is more reliable than parsing freeform text.
+
+#### Single Message Extraction
+
+```typescript
+export async function extractOrderFromMessage(
+  rawMessage: string
+): Promise<ExtractedOrder> {
+  const systemPrompt = getPrompt("SINGLE_MESSAGE_EXTRACT", "v1");
+  const toolSchema = {
+    type: "object",
+    properties: {
+      customerName: { type: ["string", "null"] },
+      customerPhone: { type: ["string", "null"] },
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            quantity: { type: "number" },
+            unit: { type: ["string", "null"] },
+            pricePerUnit: { type: ["number", "null"] },
+            totalPrice: { type: ["number", "null"] }
+          },
+          required: ["name", "quantity"]
+        }
+      },
+      totalAmount: { type: ["number", "null"] },
+      notes: { type: ["string", "null"] },
+      confidence: { type: "number", description: "Confidence score from 0.0 to 1.0" }
+    },
+    required: ["items", "confidence"]
+  };
+
+  const parsed = await extractWithTool(
+    DEFAULT_MODEL_STR, 
+    systemPrompt, 
+    rawMessage, 
+    "record_order", 
+    toolSchema
+  );
+
+  return {
+    id: randomUUID(),
+    customerName: parsed.customerName || undefined,
+    customerPhone: parsed.customerPhone || undefined,
+    items: Array.isArray(parsed.items)
+      ? parsed.items.map((item: any) => ({
+          name: String(item.name || "Unknown"),
+          quantity: Number(item.quantity) || 1,
+          unit: item.unit || undefined,
+          pricePerUnit: item.pricePerUnit != null ? Number(item.pricePerUnit) : undefined,
+          totalPrice: item.totalPrice != null ? Number(item.totalPrice) : undefined,
+        }))
+      : [],
+    totalAmount: parsed.totalAmount != null ? Number(parsed.totalAmount) : undefined,
+    currency: "INR",
+    notes: parsed.notes || undefined,
+    rawMessage,
+    confidence: Math.min(1, Math.max(0, Number(parsed.confidence) || 0.5)),
+    status: "pending",
+    createdAt: new Date().toISOString(),
+  };
+}
+```
+
+*Source: backend/src/services/anthropicService.ts:158-215*
+
+#### Chat Log Extraction
+
+```typescript
+export async function extractOrderFromChat(
+  messages: ChatMessage[]
+): Promise<ExtractedChatOrder> {
+  const optimizedMessages = applySlidingWindow(messages);
+  const conversationText = optimizedMessages
+    .map((m) => `${m.sender}: ${m.text}`)
+    .join("\n");
+  
+  const systemPrompt = getPrompt("CHAT_EXTRACT", "v1");
+  const toolSchema = {
+    type: "object",
+    properties: {
+      customer_name: { type: ["string", "null"] },
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            product_name: { type: "string" },
+            quantity: { type: "number" },
+            price: { type: ["number", "null"] }
+          },
+          required: ["product_name", "quantity"]
+        }
+      },
+      delivery_address: { type: ["string", "null"] },
+      delivery_date: { type: ["string", "null"] },
+      special_instructions: { type: ["string", "null"] },
+      total: { type: ["number", "null"] },
+      confidence: { type: "string", enum: ["high", "medium", "low"] }
+    },
+    required: ["items", "confidence"]
+  };
+
+  const parsed = await extractWithTool(
+    CHAT_EXTRACT_MODEL, 
+    systemPrompt, 
+    conversationText, 
+    "record_chat_order", 
+    toolSchema
+  );
+
+  return {
+    id: randomUUID(),
+    customer_name: parsed.customer_name || null,
+    items: parsed.items.map((item: any) => ({
+      product_name: String(item.product_name || "Unknown"),
+      quantity: Number(item.quantity) || 1,
+      price: item.price != null ? Number(item.price) : null,
+    })),
+    delivery_address: parsed.delivery_address || null,
+    delivery_date: parsed.delivery_date || null,
+    special_instructions: parsed.special_instructions || null,
+    total: parsed.total != null ? Number(parsed.total) : null,
+    confidence: ["high", "medium", "low"].includes(parsed.confidence)
+      ? parsed.confidence
+      : "medium",
+    status: "pending",
+    created_at: new Date().toISOString(),
+    raw_messages: messages,
+  };
+}
+```
+
+*Source: backend/src/services/anthropicService.ts:217-275*
+
+### Retry Logic & Error Handling
+
+The service implements **exponential backoff with jitter** to handle rate limits and transient errors.
+
+```typescript
+const calculateBackoff = (attempt: number): number => {
+  const baseDelay = Math.min(
+    MAX_RETRY_DELAY,
+    INITIAL_RETRY_DELAY * Math.pow(2, attempt)
+  );
+  const jitter = Math.random() * 1000;
+  return baseDelay + jitter;
+};
+
+async function extractWithTool(
+  model: string,
+  systemPrompt: string,
+  userContent: string,
+  toolName: string,
+  toolSchema: any
+): Promise<any> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await anthropic.messages.create({
+        model,
+        max_tokens: 1024,
+        system: [
+          {
+            type: "text" as const,
+            text: systemPrompt,
+            cache_control: { type: "ephemeral" } 
+          } as any,
+        ],
+        tools: [{
+          name: toolName,
+          description: "Record structured order details from the provided message/chat",
+          input_schema: toolSchema
+        }],
+        tool_choice: { type: "tool", name: toolName },
+        messages: [{ role: "user", content: userContent }],
+      });
+
+      const toolCall = response.content.find(block => block.type === "tool_use");
+      if (!toolCall || toolCall.type !== "tool_use") {
+        throw new Error("Claude did not return the expected structured tool call.");
+      }
+
+      return toolCall.input;
+
+    } catch (error: any) {
+      lastError = error;
+      const status = error?.status ?? error?.statusCode ?? 0;
+      const isClientError = status >= 400 && status < 500 && status !== 429;
+      const isRateLimit = status === 429;
+      
+      // Fail fast on client errors (e.g. invalid API key)
+      if (isClientError) {
+        throw error;
+      }
+
+      if (attempt < MAX_RETRIES) {
+        let delay: number;
+
+        // Respect Retry-After header from 429 responses
+        if (isRateLimit && error.headers?.["retry-after"]) {
+          const retryAfterSec = Number(error.headers["retry-after"]);
+          delay = (isNaN(retryAfterSec) ? calculateBackoff(attempt) : retryAfterSec * 1000);
+        } else {
+          delay = calculateBackoff(attempt);
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  throw new Error(`Claude API failed after ${MAX_RETRIES + 1} attempts: ${lastError?.message}`);
+}
+```
+
+**Retry behavior:**
+- **Max 3 retries** (4 total attempts)
+- **Exponential backoff**: 2s → 4s → 8s (capped at 10s)
+- **Jitter**: Random 0-1000ms added to prevent thundering herd
+- **Respects `Retry-After` header** on 429 responses
+- **Fails fast** on 4xx client errors (except 429)
+
+*Source: backend/src/services/anthropicService.ts:66-156*
+
+## REST API Endpoints
+
+### Extract Order from Single Message
+
+<CodeGroup>
+```bash Synchronous
+curl -X POST https://api.chat2cash.in/api/orders/extract \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Hi, I need 5 kg mangoes and 2 dozen bananas. My number is 9876543210"
+  }'
+```
+
+```bash Asynchronous (Background Job)
+curl -X POST https://api.chat2cash.in/api/orders/extract-async \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Hi, I need 5 kg mangoes",
+    "webhookUrl": "https://yourdomain.com/webhook"
+  }'
+```
+</CodeGroup>
+
+**Response (Synchronous):**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "customerPhone": "9876543210",
+  "items": [
+    {
+      "name": "mangoes",
+      "quantity": 5,
+      "unit": "kg"
+    },
+    {
+      "name": "bananas",
+      "quantity": 2,
+      "unit": "dozen"
+    }
+  ],
+  "currency": "INR",
+  "confidence": 0.92,
+  "status": "pending",
+  "createdAt": "2026-03-04T10:30:00.000Z"
+}
+```
+
+**Response (Asynchronous):**
+```json
+{
+  "status": "queued",
+  "jobId": "job-12345",
+  "message": "Order extraction queued for processing",
+  "statusUrl": "/api/jobs/job-12345"
+}
+```
+
+*Source: backend/src/controllers/orderController.ts:13-18, 102-119*
+
+### Extract Order from Chat Log
+
+```bash
+curl -X POST https://api.chat2cash.in/api/orders/extract-chat \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      { "sender": "customer", "text": "Hi, mujhe mangoes chahiye" },
+      { "sender": "business", "text": "How many kg?" },
+      { "sender": "customer", "text": "5 kg dedo" }
+    ]
+  }'
+```
+
+**Response:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440001",
+  "customer_name": null,
+  "items": [
+    {
+      "product_name": "mangoes",
+      "quantity": 5,
+      "price": null
+    }
+  ],
+  "delivery_address": null,
+  "delivery_date": null,
+  "special_instructions": null,
+  "total": null,
+  "confidence": "high",
+  "status": "pending",
+  "created_at": "2026-03-04T10:30:00.000Z"
+}
+```
+
+*Source: backend/src/controllers/orderController.ts:54-59, 121-138*
+
+## Performance Metrics
+
+The service logs detailed performance metrics for each API call:
+
+```typescript
+log(`Claude API call starting (model: ${model}, input: ${userContent.length} chars)`, "anthropic");
+const attemptStart = Date.now();
+
+// ... API call ...
+
+const elapsed = Date.now() - attemptStart;
+log(`Claude API responded in ${elapsed}ms (usage: ${response.usage.input_tokens}in/${response.usage.output_tokens}out)`, "anthropic");
+```
+
+Example log output:
+```
+[anthropic] Claude API call starting (model: claude-3-5-sonnet-20241022, input: 248 chars)
+[anthropic] applySlidingWindow: kept 12/45 messages (~7823 tokens)
+[anthropic] Claude API responded in 1847ms (usage: 8012in/156out)
+[anthropic] Extraction complete — 3 items found
+```
+
+*Source: backend/src/services/anthropicService.ts:92, 94, 114, 121-122*
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use async endpoints for long chats">
+    Chat logs with 50+ messages should use `/api/orders/extract-chat-async` to avoid request timeouts. The extraction job will run in the background via BullMQ.
+  </Accordion>
+
+  <Accordion title="Monitor token usage">
+    The service logs input/output token counts. For Hinglish conversations, expect 2-3× higher token consumption than English-only text.
+  </Accordion>
+
+  <Accordion title="Handle confidence scores">
+    The extracted order includes a `confidence` field (0.0-1.0 or "high"/"medium"/"low"). Orders with low confidence should be reviewed manually.
+  </Accordion>
+
+  <Accordion title="Set appropriate timeout values">
+    Configure `AI_REQUEST_TIMEOUT_MS` based on your model and expected input size. Recommended: 30000ms (30 seconds) for chat extraction.
+  </Accordion>
+</AccordionGroup>
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="Async Processing" icon="gears" href="/features/async-processing">
+    Learn about BullMQ job queues for background extraction
+  </Card>
+  <Card title="Order Management" icon="list-check" href="/features/order-management">
+    Managing order lifecycle and status updates
+  </Card>
+</CardGroup>

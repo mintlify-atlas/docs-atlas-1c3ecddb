@@ -1,0 +1,549 @@
+---
+title: "Configuration"
+description: "Environment variables, business profiles, and API keys for Chat2Cash"
+---
+
+## Environment Variables
+
+Chat2Cash uses environment variables for configuration. Create a `.env` file in your project root (for Docker) or in the `backend/` directory (for manual setup).
+
+### Required Variables
+
+These variables must be set for Chat2Cash to function:
+
+#### Database
+
+<ParamField path="DATABASE_URL" type="string" required>
+  PostgreSQL connection string
+  
+  ```bash
+  DATABASE_URL=postgres://user:password@localhost:5432/chat2cash
+  ```
+  
+  **Format:** `postgres://[user]:[password]@[host]:[port]/[database]`
+  
+  For Docker Compose, this is automatically set to:
+  ```bash
+  DATABASE_URL=postgres://user:password@db:5432/chat2cash
+  ```
+</ParamField>
+
+#### Redis
+
+<ParamField path="REDIS_URL" type="string" required>
+  Redis connection string for job queues
+  
+  ```bash
+  REDIS_URL=redis://localhost:6379
+  ```
+  
+  For authenticated Redis:
+  ```bash
+  REDIS_URL=redis://:password@localhost:6379
+  ```
+  
+  For Docker Compose:
+  ```bash
+  REDIS_URL=redis://redis:6379
+  ```
+</ParamField>
+
+#### Anthropic AI
+
+<ParamField path="ANTHROPIC_API_KEY" type="string" required>
+  Your Anthropic API key for Claude
+  
+  ```bash
+  ANTHROPIC_API_KEY=sk-ant-api03-...
+  ```
+  
+  <Warning>
+    Keep this key secure. Never commit it to version control.
+  </Warning>
+  
+  Get your API key from: [https://console.anthropic.com/](https://console.anthropic.com/)
+</ParamField>
+
+### Server Configuration
+
+<ParamField path="NODE_ENV" type="enum" default="development">
+  Runtime environment
+  
+  ```bash
+  NODE_ENV=development  # or production, test
+  ```
+  
+  **Values:** `development`, `production`, `test`
+  
+  In production mode:
+  - Enables SSL for PostgreSQL
+  - Disables verbose logging
+  - Optimizes performance
+</ParamField>
+
+<ParamField path="PORT" type="string" default="3000">
+  Port for the API server
+  
+  ```bash
+  PORT=3000
+  ```
+</ParamField>
+
+### AI Model Configuration
+
+<ParamField path="AI_MODEL_FAST" type="string" default="claude-3-haiku-20240307">
+  Model for quick, simple extractions
+  
+  ```bash
+  AI_MODEL_FAST=claude-3-haiku-20240307
+  ```
+  
+  Used for single-message extractions where speed matters.
+</ParamField>
+
+<ParamField path="AI_MODEL_SMART" type="string" default="claude-3-5-sonnet-20241022">
+  Model for complex, multi-message extractions
+  
+  ```bash
+  AI_MODEL_SMART=claude-3-5-sonnet-20241022
+  ```
+  
+  Used for full chat history analysis and ambiguous orders.
+</ParamField>
+
+<ParamField path="AI_REQUEST_TIMEOUT_MS" type="string" default="60000">
+  Timeout for Claude API requests in milliseconds
+  
+  ```bash
+  AI_REQUEST_TIMEOUT_MS=60000  # 60 seconds
+  ```
+</ParamField>
+
+### Business Defaults
+
+These values are used when no business profile exists in the database.
+
+<ParamField path="DEFAULT_BUSINESS_NAME" type="string" default="Chat2Cash Store">
+  Your business name for invoices
+  
+  ```bash
+  DEFAULT_BUSINESS_NAME=My Saree Shop
+  ```
+  
+  This appears on generated PDF invoices.
+</ParamField>
+
+<ParamField path="DEFAULT_GST_NUMBER" type="string" default="22AAAAA0000A1Z5">
+  Your GST identification number
+  
+  ```bash
+  DEFAULT_GST_NUMBER=22AAAAA0000A1Z5
+  ```
+  
+  **Format:** 15-character alphanumeric GST number
+  
+  Used for GST-compliant invoice generation.
+</ParamField>
+
+### Rate Limiting
+
+<ParamField path="RATE_LIMIT_FREE" type="string" default="20">
+  Requests per window for free tier
+  
+  ```bash
+  RATE_LIMIT_FREE=20
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_PRO" type="string" default="200">
+  Requests per window for pro tier
+  
+  ```bash
+  RATE_LIMIT_PRO=200
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_ENTERPRISE" type="string" default="2000">
+  Requests per window for enterprise tier
+  
+  ```bash
+  RATE_LIMIT_ENTERPRISE=2000
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_WINDOW_MS" type="string" default="900000">
+  Time window for rate limiting in milliseconds
+  
+  ```bash
+  RATE_LIMIT_WINDOW_MS=900000  # 15 minutes
+  ```
+</ParamField>
+
+### Optional Variables
+
+<ParamField path="SENTRY_DSN" type="string" optional>
+  Sentry DSN for error tracking and monitoring
+  
+  ```bash
+  SENTRY_DSN=https://your-key@o123456.ingest.sentry.io/7654321
+  ```
+  
+  If not provided, error tracking is disabled.
+  
+  Get your DSN from: [https://sentry.io/](https://sentry.io/)
+</ParamField>
+
+<ParamField path="FRONTEND_URL" type="string" optional>
+  Frontend URL for CORS configuration
+  
+  ```bash
+  FRONTEND_URL=http://localhost:5173
+  ```
+  
+  Allows the API to accept requests from your frontend application.
+</ParamField>
+
+<ParamField path="DATABASE_CA_CERT" type="string" optional>
+  SSL certificate for PostgreSQL connection
+  
+  ```bash
+  DATABASE_CA_CERT="-----BEGIN CERTIFICATE-----\nMIID...\n-----END CERTIFICATE-----"
+  ```
+  
+  Required for SSL connections in production (e.g., Neon, Railway, Supabase).
+</ParamField>
+
+<ParamField path="NEON_AUTH_URL" type="string" optional>
+  Neon authentication URL (if using Neon Authorize)
+  
+  ```bash
+  NEON_AUTH_URL=https://your-project.auth.neon.tech
+  ```
+</ParamField>
+
+<ParamField path="NEON_JWKS_URL" type="string" optional>
+  Neon JWKS URL for JWT validation
+  
+  ```bash
+  NEON_JWKS_URL=https://your-project.auth.neon.tech/.well-known/jwks.json
+  ```
+</ParamField>
+
+<ParamField path="AZURE_STORAGE_ACCOUNT_NAME" type="string" optional>
+  Azure Storage account name for invoice storage
+  
+  ```bash
+  AZURE_STORAGE_ACCOUNT_NAME=chat2cashstorage
+  ```
+</ParamField>
+
+<ParamField path="AZURE_STORAGE_ACCOUNT_KEY" type="string" optional>
+  Azure Storage account key
+  
+  ```bash
+  AZURE_STORAGE_ACCOUNT_KEY=your-storage-key
+  ```
+</ParamField>
+
+<ParamField path="AZURE_STORAGE_CONTAINER_NAME" type="string" default="invoices">
+  Azure Storage container for invoices
+  
+  ```bash
+  AZURE_STORAGE_CONTAINER_NAME=invoices
+  ```
+</ParamField>
+
+## Complete Example
+
+Here's a complete `.env` file for local development:
+
+```bash .env
+# Server
+NODE_ENV=development
+PORT=3000
+
+# Database
+DATABASE_URL=postgres://user:password@localhost:5432/chat2cash
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# Anthropic AI
+ANTHROPIC_API_KEY=sk-ant-api03-your-actual-key-here
+AI_MODEL_FAST=claude-3-haiku-20240307
+AI_MODEL_SMART=claude-3-5-sonnet-20241022
+AI_REQUEST_TIMEOUT_MS=60000
+
+# Business Defaults
+DEFAULT_BUSINESS_NAME=My Saree Shop
+DEFAULT_GST_NUMBER=22AAAAA0000A1Z5
+
+# Rate Limiting
+RATE_LIMIT_FREE=20
+RATE_LIMIT_PRO=200
+RATE_LIMIT_ENTERPRISE=2000
+RATE_LIMIT_WINDOW_MS=900000
+
+# Optional: Error Tracking
+SENTRY_DSN=https://your-sentry-dsn@sentry.io/123456
+
+# Optional: CORS
+FRONTEND_URL=http://localhost:5173
+```
+
+For Docker Compose, use this minimal `.env` in the project root:
+
+```bash .env (Docker)
+# Required
+ANTHROPIC_API_KEY=sk-ant-api03-your-actual-key-here
+
+# Business Defaults
+DEFAULT_BUSINESS_NAME=My Saree Shop
+DEFAULT_GST_NUMBER=22AAAAA0000A1Z5
+
+# Optional
+SENTRY_DSN=https://your-sentry-dsn@sentry.io/123456
+```
+
+Docker Compose handles `DATABASE_URL`, `REDIS_URL`, and other service URLs automatically.
+
+## Business Profiles
+
+Business profiles allow you to configure business-specific information that appears on invoices and documents.
+
+### Database Schema
+
+Business profiles are stored in the `business_profiles` table:
+
+```typescript schema.ts
+export const businessProfiles = pgTable('business_profiles', {
+  id: serial('id').primaryKey(),
+  businessName: varchar('business_name', { length: 255 }).notNull(),
+  gstNumber: varchar('gst_number', { length: 15 }).notNull(),
+  address: text('address'),
+  phone: varchar('phone', { length: 20 }),
+  email: varchar('email', { length: 255 }),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+```
+
+### Creating a Profile
+
+Currently, business profiles must be created directly in the database. Use `psql` or a database client:
+
+```sql
+INSERT INTO business_profiles (
+  business_name,
+  gst_number,
+  address,
+  phone,
+  email
+) VALUES (
+  'My Saree Shop',
+  '22AAAAA0000A1Z5',
+  '123 Market Street, Mumbai, Maharashtra 400001',
+  '+91 98765 43210',
+  'contact@mysareeshop.com'
+);
+```
+
+<Info>
+  A future release will add API endpoints for managing business profiles.
+</Info>
+
+### Fallback Behavior
+
+If no business profile exists in the database, Chat2Cash uses the environment variables:
+- `DEFAULT_BUSINESS_NAME`
+- `DEFAULT_GST_NUMBER`
+
+This allows the system to function immediately without database setup.
+
+## API Keys
+
+### Anthropic API Key
+
+Chat2Cash requires an Anthropic API key for Claude access:
+
+<Steps>
+  <Step title="Sign up for Anthropic">
+    Visit [https://console.anthropic.com/](https://console.anthropic.com/) and create an account.
+  </Step>
+
+  <Step title="Generate an API key">
+    1. Navigate to **Settings** → **API Keys**
+    2. Click **Create Key**
+    3. Name your key (e.g., "Chat2Cash Production")
+    4. Copy the key immediately (it won't be shown again)
+  </Step>
+
+  <Step title="Add to environment">
+    Add the key to your `.env` file:
+    
+    ```bash
+    ANTHROPIC_API_KEY=sk-ant-api03-...
+    ```
+  </Step>
+
+  <Step title="Monitor usage">
+    Track your API usage in the Anthropic console to avoid unexpected charges.
+  </Step>
+</Steps>
+
+<Warning>
+  **Security Best Practices:**
+  - Never commit `.env` files to version control
+  - Rotate keys periodically
+  - Use different keys for development and production
+  - Set spending limits in the Anthropic console
+</Warning>
+
+### Sentry Error Tracking (Optional)
+
+For production deployments, Sentry provides real-time error tracking:
+
+<Steps>
+  <Step title="Create a Sentry project">
+    1. Sign up at [https://sentry.io/](https://sentry.io/)
+    2. Create a new project
+    3. Select **Node.js** as the platform
+  </Step>
+
+  <Step title="Get your DSN">
+    Copy the DSN from the project settings:
+    
+    ```
+    https://abc123@o456789.ingest.sentry.io/987654
+    ```
+  </Step>
+
+  <Step title="Add to environment">
+    ```bash
+    SENTRY_DSN=https://abc123@o456789.ingest.sentry.io/987654
+    ```
+    
+    Restart the API and worker processes.
+  </Step>
+</Steps>
+
+Sentry automatically captures:
+- Unhandled exceptions
+- API errors
+- Queue job failures
+- Performance metrics
+
+## Validation
+
+Chat2Cash validates all environment variables on startup using Zod schemas. If required variables are missing or invalid, the application exits with a detailed error:
+
+```typescript env.ts
+const envSchema = z.object({
+  PORT: z.string().default("3000"),
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  DATABASE_URL: z.string().url("DATABASE_URL must be a valid connection string"),
+  ANTHROPIC_API_KEY: z.string().min(1, "ANTHROPIC_API_KEY is required"),
+  // ...
+});
+
+const _env = envSchema.safeParse(process.env);
+
+if (!_env.success) {
+  console.error("❌ Invalid environment variables:", _env.error.format());
+  process.exit(1);
+}
+```
+
+Example error output:
+
+```
+❌ Invalid environment variables: {
+  ANTHROPIC_API_KEY: { _errors: [ 'ANTHROPIC_API_KEY is required' ] },
+  DATABASE_URL: { _errors: [ 'DATABASE_URL must be a valid connection string' ] }
+}
+```
+
+## Docker Compose Variables
+
+The `docker-compose.yml` automatically sets most environment variables. You only need to provide:
+
+```yaml docker-compose.yml
+services:
+  api:
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgres://user:password@db:5432/chat2cash
+      REDIS_URL: redis://redis:6379
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # From .env
+      DEFAULT_BUSINESS_NAME: ${DEFAULT_BUSINESS_NAME:-Chat2Cash Store}
+      DEFAULT_GST_NUMBER: ${DEFAULT_GST_NUMBER:-22AAAAA0000A1Z5}
+      FRONTEND_URL: http://localhost:5173
+```
+
+Variables with `${VAR:-default}` syntax use the value from your `.env` file, or fall back to the default if not set.
+
+## Security Considerations
+
+<Warning>
+  **Never expose these variables publicly:**
+  - `ANTHROPIC_API_KEY`
+  - `DATABASE_URL` (contains password)
+  - `SENTRY_DSN`
+  - `AZURE_STORAGE_ACCOUNT_KEY`
+</Warning>
+
+<Check>
+  **Best practices:**
+  - Add `.env` to `.gitignore`
+  - Use environment-specific `.env` files (`.env.development`, `.env.production`)
+  - Store production secrets in secure vaults (AWS Secrets Manager, HashiCorp Vault, etc.)
+  - Use read-only database credentials when possible
+  - Enable SSL for all external connections in production
+</Check>
+
+## Troubleshooting
+
+### "Invalid environment variables" on startup
+
+Check that all required variables are set:
+```bash
+# View current environment
+env | grep -E "DATABASE|REDIS|ANTHROPIC"
+```
+
+### Changes not taking effect
+
+Restart the services after updating `.env`:
+
+```bash
+# Docker
+docker-compose down && docker-compose up
+
+# Manual
+# Kill and restart npm run dev and npm run dev:worker
+```
+
+### Docker Compose not reading .env
+
+Ensure the `.env` file is in the same directory as `docker-compose.yml`:
+
+```bash
+ls -la
+# Should show both docker-compose.yml and .env
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="API Reference" icon="code" href="/api/endpoints/extract">
+    Explore the REST API endpoints
+  </Card>
+  
+  <Card title="Docker Setup" icon="docker" href="/installation/docker">
+    Deploy with Docker Compose
+  </Card>
+  
+  <Card title="Manual Setup" icon="hammer" href="/installation/manual">
+    Set up a local development environment
+  </Card>
+</CardGroup>

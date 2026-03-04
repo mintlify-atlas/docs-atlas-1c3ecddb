@@ -1,0 +1,298 @@
+---
+title: "Job Stream"
+description: "Real-time Server-Sent Events (SSE) streaming of job status"
+---
+
+## Endpoint
+
+```
+GET /api/jobs/:id/stream
+```
+
+Establish a Server-Sent Events (SSE) connection to receive real-time updates about a background extraction job. The server pushes status updates automatically as the job progresses.
+
+## Authentication
+
+Requires a valid Bearer token in the `Authorization` header.
+
+```bash
+Authorization: Bearer YOUR_API_KEY
+```
+
+## Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique job identifier returned from async extraction endpoints.
+</ParamField>
+
+## How It Works
+
+1. Client establishes an SSE connection to this endpoint
+2. Server polls the job status every **1 second**
+3. Server pushes a `status` event whenever the job state updates
+4. Connection closes automatically when job reaches a terminal state (`completed` or `failed`)
+5. Client can close the connection at any time
+
+## Event Types
+
+The server pushes two types of events:
+
+### `status` Event
+
+Pushed when job status updates are available.
+
+**Event Data Format:**
+
+```json
+{
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "state": "active",
+  "progress": 70,
+  "result": null,
+  "error": null,
+  "createdAt": "2024-03-04T10:30:00.000Z",
+  "processedAt": "2024-03-04T10:30:05.000Z",
+  "completedAt": null,
+  "attempts": 1
+}
+```
+
+### `error_event` Event
+
+Pushed when an error occurs (e.g., job not found).
+
+**Event Data Format:**
+
+```json
+{
+  "message": "Job 550e8400-e29b-41d4-a716-446655440000 not found"
+}
+```
+
+## Example: Raw SSE Stream
+
+```bash
+curl -N -H "Authorization: Bearer YOUR_API_KEY" \
+  https://your-domain.com/api/jobs/550e8400-e29b-41d4-a716-446655440000/stream
+```
+
+**Response Stream:**
+
+```
+event: status
+data: {"jobId":"550e8400-e29b-41d4-a716-446655440000","state":"waiting","progress":0,"createdAt":"2024-03-04T10:30:00.000Z","attempts":0}
+
+event: status
+data: {"jobId":"550e8400-e29b-41d4-a716-446655440000","state":"active","progress":10,"processedAt":"2024-03-04T10:30:05.000Z","attempts":1}
+
+event: status
+data: {"jobId":"550e8400-e29b-41d4-a716-446655440000","state":"active","progress":70,"processedAt":"2024-03-04T10:30:05.000Z","attempts":1}
+
+event: status
+data: {"jobId":"550e8400-e29b-41d4-a716-446655440000","state":"completed","progress":100,"result":{"orderId":"cm59h2c4y000008l31y4q8bqz","status":"completed"},"completedAt":"2024-03-04T10:30:12.000Z","attempts":1}
+```
+
+## JavaScript Client Example
+
+```javascript
+const streamJobStatus = (jobId) => {
+  const eventSource = new EventSource(
+    `https://your-domain.com/api/jobs/${jobId}/stream`,
+    {
+      headers: {
+        'Authorization': `Bearer ${YOUR_API_KEY}`
+      }
+    }
+  );
+
+  eventSource.addEventListener('status', (event) => {
+    const status = JSON.parse(event.data);
+    console.log('Job status:', status);
+
+    // Update UI based on state
+    if (status.state === 'completed') {
+      console.log('✅ Order created:', status.result.orderId);
+      eventSource.close();
+    } else if (status.state === 'failed') {
+      console.error('❌ Job failed:', status.error);
+      eventSource.close();
+    } else {
+      console.log(`⏳ Progress: ${status.progress}%`);
+    }
+  });
+
+  eventSource.addEventListener('error_event', (event) => {
+    const error = JSON.parse(event.data);
+    console.error('Error:', error.message);
+    eventSource.close();
+  });
+
+  eventSource.onerror = (error) => {
+    console.error('Connection error:', error);
+    eventSource.close();
+  };
+
+  return eventSource;
+};
+
+// Usage
+const stream = streamJobStatus('550e8400-e29b-41d4-a716-446655440000');
+
+// Close connection manually if needed
+// stream.close();
+```
+
+## React Hook Example
+
+```javascript
+import { useEffect, useState } from 'react';
+
+const useJobStream = (jobId) => {
+  const [status, setStatus] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!jobId) return;
+
+    const eventSource = new EventSource(
+      `https://your-domain.com/api/jobs/${jobId}/stream`,
+      {
+        headers: {
+          'Authorization': `Bearer ${YOUR_API_KEY}`
+        }
+      }
+    );
+
+    eventSource.addEventListener('status', (event) => {
+      const data = JSON.parse(event.data);
+      setStatus(data);
+
+      if (data.state === 'completed' || data.state === 'failed') {
+        eventSource.close();
+      }
+    });
+
+    eventSource.addEventListener('error_event', (event) => {
+      const data = JSON.parse(event.data);
+      setError(data.message);
+      eventSource.close();
+    });
+
+    return () => eventSource.close();
+  }, [jobId]);
+
+  return { status, error };
+};
+
+// Usage in component
+const JobProgress = ({ jobId }) => {
+  const { status, error } = useJobStream(jobId);
+
+  if (error) return <div>Error: {error}</div>;
+  if (!status) return <div>Connecting...</div>;
+
+  return (
+    <div>
+      <p>State: {status.state}</p>
+      <p>Progress: {status.progress}%</p>
+      {status.result && <p>Order ID: {status.result.orderId}</p>}
+      {status.error && <p>Error: {status.error}</p>}
+    </div>
+  );
+};
+```
+
+## Node.js Client Example
+
+```javascript
+import { EventSource } from 'eventsource';
+
+const streamJobStatus = (jobId) => {
+  return new Promise((resolve, reject) => {
+    const eventSource = new EventSource(
+      `https://your-domain.com/api/jobs/${jobId}/stream`,
+      {
+        headers: {
+          'Authorization': `Bearer ${YOUR_API_KEY}`
+        }
+      }
+    );
+
+    eventSource.addEventListener('status', (event) => {
+      const status = JSON.parse(event.data);
+      console.log('Status update:', status);
+
+      if (status.state === 'completed') {
+        eventSource.close();
+        resolve(status);
+      } else if (status.state === 'failed') {
+        eventSource.close();
+        reject(new Error(status.error));
+      }
+    });
+
+    eventSource.addEventListener('error_event', (event) => {
+      const error = JSON.parse(event.data);
+      eventSource.close();
+      reject(new Error(error.message));
+    });
+  });
+};
+
+// Usage
+try {
+  const result = await streamJobStatus('550e8400-e29b-41d4-a716-446655440000');
+  console.log('Job completed:', result);
+} catch (error) {
+  console.error('Job failed:', error.message);
+}
+```
+
+## Response Headers
+
+```
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
+X-Accel-Buffering: no
+```
+
+## Benefits Over Polling
+
+<CardGroup cols={2}>
+  <Card title="Reduced Latency" icon="bolt">
+    Updates pushed instantly when available, no polling delay.
+  </Card>
+  
+  <Card title="Lower Server Load" icon="server">
+    Single connection vs. repeated HTTP requests.
+  </Card>
+  
+  <Card title="Better UX" icon="sparkles">
+    Real-time progress updates for better user experience.
+  </Card>
+  
+  <Card title="Efficient" icon="gauge-high">
+    No wasted bandwidth on unchanged status checks.
+  </Card>
+</CardGroup>
+
+## Rate Limiting
+
+This endpoint is subject to rate limiting:
+- **Limit**: 20 connection attempts per minute per API key
+- **Quota**: Enforced via the `generalLimiter` middleware
+
+## Notes
+
+<Info>
+  The server polls the job status every **1 second** internally. You don't need to implement your own polling logic.
+</Info>
+
+<Warning>
+  Keep-alive connections are automatically closed by the server when the job reaches a terminal state. Always handle the connection close event in your client code.
+</Warning>
+
+<Note>
+  If using a reverse proxy (e.g., Nginx), ensure buffering is disabled for SSE endpoints. The `X-Accel-Buffering: no` header is automatically set by the server.
+</Note>

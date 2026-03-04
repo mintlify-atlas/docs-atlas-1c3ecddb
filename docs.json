@@ -1,122 +1,142 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Chat2Cash",
+  "theme": "palm",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#25D366",
+    "light": "#DCF8C6",
+    "dark": "#075E54"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/swayam-mishra/Chat2Cash"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/swayam-mishra/Chat2Cash"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Overview",
             "pages": [
-              "index",
+              "introduction",
+              "why-chat2cash",
+              "how-it-works"
+            ]
+          },
+          {
+            "group": "Getting Started",
+            "pages": [
               "quickstart",
-              "development"
+              "installation/docker",
+              "installation/manual",
+              "configuration"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Features",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "features/ai-extraction",
+              "features/order-management",
+              "features/invoice-generation",
+              "features/async-processing"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Architecture",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "architecture/overview",
+              "architecture/database-schema",
+              "architecture/queue-system",
+              "architecture/multi-tenant"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Deployment",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "deployment/docker-compose",
+              "deployment/scaling",
+              "deployment/environment-variables"
+            ]
+          },
+          {
+            "group": "Security & Observability",
+            "pages": [
+              "security/authentication",
+              "security/rate-limiting",
+              "security/pii-redaction",
+              "observability/logging",
+              "observability/error-tracking"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Getting Started",
             "pages": [
-              "api-reference/introduction"
+              "api/overview",
+              "api/authentication"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Extraction",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/endpoints/extract",
+              "api/endpoints/extract-order",
+              "api/endpoints/async-extract",
+              "api/endpoints/async-extract-order"
+            ]
+          },
+          {
+            "group": "Orders",
+            "pages": [
+              "api/endpoints/list-orders",
+              "api/endpoints/get-order",
+              "api/endpoints/update-order",
+              "api/endpoints/delete-order"
+            ]
+          },
+          {
+            "group": "Invoices",
+            "pages": [
+              "api/endpoints/generate-invoice",
+              "api/endpoints/download-invoice"
+            ]
+          },
+          {
+            "group": "Jobs & Queue",
+            "pages": [
+              "api/endpoints/job-status",
+              "api/endpoints/job-stream",
+              "api/endpoints/queue-health"
+            ]
+          },
+          {
+            "group": "Admin",
+            "pages": [
+              "api/endpoints/dlq-list",
+              "api/endpoints/dlq-retry",
+              "api/endpoints/stats"
+            ]
+          },
+          {
+            "group": "System",
+            "pages": [
+              "api/endpoints/health"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

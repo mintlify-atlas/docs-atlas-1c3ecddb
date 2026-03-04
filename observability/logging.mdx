@@ -1,0 +1,374 @@
+---
+title: Logging
+description: Structured logging with Pino, correlation IDs, and automatic PII redaction
+---
+
+Chat2Cash uses Pino for high-performance structured logging with automatic correlation ID injection and sensitive data redaction.
+
+## Logger Configuration
+
+The logger is configured with environment-aware settings:
+
+```typescript
+// From logger.ts:20-36
+export const logger = pino({
+  level: env.NODE_ENV === "production" ? "info" : "debug",
+  transport: env.NODE_ENV !== "production" ? { target: "pino-pretty", options: { colorize: true } } : undefined,
+  serializers: {
+    req: pino.stdSerializers.req,
+    res: pino.stdSerializers.res,
+    err: pino.stdSerializers.err,
+  },
+  redact: {
+    paths: SENSITIVE_KEYS.flatMap(key => [`req.body.${key}`, `res.body.${key}`, `*.${key}`]),
+    censor: "***REDACTED***",
+  },
+  // Inject correlation ID into every log line
+  mixin() {
+    return { correlationId: getCorrelationId() };
+  },
+});
+```
+
+**Environment modes:**
+- **Development:** Uses `pino-pretty` for human-readable colorized output
+- **Production:** Outputs JSON for log aggregation (Datadog, CloudWatch, etc.)
+
+## Correlation ID Flow
+
+### AsyncLocalStorage
+
+Correlation IDs propagate through the entire request lifecycle using Node.js `AsyncLocalStorage`:
+
+```typescript
+// From logger.ts:11-16
+export const requestContext = new AsyncLocalStorage<{ correlationId: string }>();
+
+export function getCorrelationId(): string {
+  return requestContext.getStore()?.correlationId ?? "no-context";
+}
+```
+
+This eliminates the need to pass `correlationId` as a function parameter throughout the codebase.
+
+### Correlation ID Middleware
+
+```typescript
+// From logger.ts:43-49
+export function correlationId(req: Request, _res: Response, next: NextFunction) {
+  const id = (req.headers["x-correlation-id"] as string) || crypto.randomUUID();
+  requestContext.run({ correlationId: id }, () => {
+    _res.setHeader("x-correlation-id", id);
+    next();
+  });
+}
+```
+
+**Behavior:**
+1. Checks for `x-correlation-id` header in incoming requests
+2. Generates a new UUID if the header is missing
+3. Stores the ID in `AsyncLocalStorage`
+4. Returns the ID in the response header
+5. All logs within this request context automatically include the correlation ID
+
+### Cross-Service Propagation
+
+When making requests to external services or enqueueing jobs, pass the correlation ID:
+
+```typescript
+import { getCorrelationId } from "./middlewares/logger";
+
+// HTTP requests
+const response = await fetch("https://api.partner.com/webhook", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-Correlation-Id": getCorrelationId(),
+  },
+  body: JSON.stringify(payload),
+});
+
+// Queue jobs
+await extractionQueue.add("extract", {
+  message: "...",
+  orgId: "org_123",
+  correlationId: getCorrelationId(),
+});
+```
+
+## Request Logging
+
+HTTP requests are automatically logged with timing and metadata:
+
+```typescript
+// From logger.ts:51-66
+export function requestLogger(req: Request, res: Response, next: NextFunction) {
+  const start = Date.now();
+  
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    logger.info({
+      method: req.method,
+      url: req.originalUrl,
+      statusCode: res.statusCode,
+      duration: `${duration}ms`,
+      ip: req.ip,
+    }, "HTTP Request Processed");
+  });
+  
+  next();
+}
+```
+
+**Log output (development):**
+```
+[INFO] HTTP Request Processed
+  method: "POST"
+  url: "/api/orders/extract"
+  statusCode: 200
+  duration: "342ms"
+  ip: "192.168.1.45"
+  correlationId: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+```
+
+**Log output (production):**
+```json
+{
+  "level": 30,
+  "time": 1709582400000,
+  "msg": "HTTP Request Processed",
+  "method": "POST",
+  "url": "/api/orders/extract",
+  "statusCode": 200,
+  "duration": "342ms",
+  "ip": "192.168.1.45",
+  "correlationId": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+}
+```
+
+## Structured Logging
+
+### Basic Usage
+
+```typescript
+import { logger } from "./middlewares/logger";
+
+// Info log
+logger.info({ userId: "usr_123", action: "login" }, "User logged in");
+
+// Error log
+logger.error({ err: error, userId: "usr_123" }, "Failed to process order");
+
+// Debug log
+logger.debug({ query: sql, params }, "Database query executed");
+```
+
+### Backward-Compatibility Helpers
+
+For legacy code, use the simplified helpers:
+
+```typescript
+// From logger.ts:39-40
+export const log = (msg: string, source = "info") => logger.info({ source }, msg);
+export const logError = (msg: string, error?: any) => logger.error({ err: error }, msg);
+```
+
+## PII Redaction in Logs
+
+Sensitive fields are automatically censored:
+
+```typescript
+logger.info({
+  orderId: "ord_123",
+  customerName: "John Doe",        // Will be redacted
+  customerPhone: "+1-555-123-4567", // Will be redacted
+  items: [{ name: "Widget" }]
+}, "Order created");
+```
+
+**Output:**
+```json
+{
+  "level": 30,
+  "time": 1709582400000,
+  "msg": "Order created",
+  "orderId": "ord_123",
+  "customerName": "***REDACTED***",
+  "customerPhone": "***REDACTED***",
+  "items": [{ "name": "Widget" }],
+  "correlationId": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+}
+```
+
+**Redacted paths:**
+```typescript
+// From logger.ts:18
+const SENSITIVE_KEYS = ["customerName", "customerPhone", "customer_name", "customer_phone", "phone", "deliveryAddress", "delivery_address", "gst_number"];
+```
+
+## Worker Logging
+
+BullMQ workers use the same logger with correlation ID propagation:
+
+```typescript
+// From queueService.ts:79-81
+worker = new Worker<ExtractionJobData, ExtractionJobResult>(
+  "order-extraction",
+  async (job: Job<ExtractionJobData, ExtractionJobResult>) => {
+    const cid = job.data.correlationId ?? job.id;
+    logger.info({ jobId: job.id, type: job.data.type, correlationId: cid }, "Processing extraction job");
+    // ...
+  }
+);
+```
+
+**Log output:**
+```json
+{
+  "level": 30,
+  "time": 1709582400000,
+  "msg": "Processing extraction job",
+  "jobId": "12345",
+  "type": "single_message",
+  "correlationId": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+}
+```
+
+## Correlation ID Tracing
+
+### API Request → Worker → Webhook
+
+1. **API receives request:**
+   ```
+   [INFO] HTTP Request Processed
+     method: "POST"
+     url: "/api/orders/extract"
+     correlationId: "abc-123"
+   ```
+
+2. **Job enqueued:**
+   ```
+   [INFO] Extraction job enqueued
+     jobId: "45678"
+     type: "single_message"
+     correlationId: "abc-123"
+   ```
+
+3. **Worker processes job:**
+   ```
+   [INFO] Processing extraction job
+     jobId: "45678"
+     type: "single_message"
+     correlationId: "abc-123"
+   ```
+
+4. **Webhook delivered:**
+   ```
+   [INFO] Delivering webhook
+     jobId: "45678"
+     webhookUrl: "https://partner.com/webhook"
+     correlationId: "abc-123"
+   ```
+
+All logs for this transaction share the same `correlationId`, enabling full end-to-end tracing.
+
+## Log Aggregation
+
+In production, stream logs to a centralized platform:
+
+### Datadog
+
+```bash
+# Install Datadog agent
+docker run -d \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v /proc/:/host/proc/:ro \
+  -v /sys/fs/cgroup/:/host/sys/fs/cgroup:ro \
+  -e DD_API_KEY=<YOUR_KEY> \
+  -e DD_LOGS_ENABLED=true \
+  datadog/agent:latest
+```
+
+### AWS CloudWatch
+
+```typescript
+import pino from "pino";
+import { CloudWatchLogsClient, PutLogEventsCommand } from "@aws-sdk/client-cloudwatch-logs";
+
+const client = new CloudWatchLogsClient({ region: "us-east-1" });
+
+const stream = pino.transport({
+  target: "pino-cloudwatch",
+  options: {
+    logGroupName: "/chat2cash/api",
+    logStreamName: process.env.HOSTNAME,
+    awsRegion: "us-east-1",
+  },
+});
+
+export const logger = pino(stream);
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Always use structured logging">
+    Pass metadata as the first argument, message as the second:
+    ```typescript
+    logger.info({ userId, action }, "User performed action");
+    ```
+  </Step>
+  
+  <Step title="Include correlation ID in external requests">
+    Use `getCorrelationId()` when calling webhooks or third-party APIs.
+  </Step>
+  
+  <Step title="Log business events, not implementation details">
+    Good: `"Order created"`
+    
+    Bad: `"Inserted row into orders table"`
+  </Step>
+  
+  <Step title="Use appropriate log levels">
+    - **debug:** Verbose diagnostic info
+    - **info:** Normal operational events
+    - **warn:** Recoverable errors (e.g., retries)
+    - **error:** Unrecoverable failures requiring attention
+  </Step>
+  
+  <Step title="Never log sensitive data directly">
+    Rely on automatic PII redaction or manually redact:
+    ```typescript
+    logger.info({ phone: phone.slice(-4) }, "SMS sent");
+    ```
+  </Step>
+</Steps>
+
+## Common Patterns
+
+### Error Logging with Stack Traces
+
+```typescript
+try {
+  await processOrder(orderId);
+} catch (error) {
+  logger.error({ err: error, orderId }, "Order processing failed");
+  throw error;
+}
+```
+
+### Rate Limit Warnings
+
+```typescript
+if (remaining < limit * 0.1) {
+  logger.warn({ orgId, remaining, limit }, "Organization approaching rate limit");
+}
+```
+
+### Database Query Logging (Development Only)
+
+```typescript
+if (env.NODE_ENV !== "production") {
+  logger.debug({ query: sql, duration: `${ms}ms` }, "Database query executed");
+}
+```

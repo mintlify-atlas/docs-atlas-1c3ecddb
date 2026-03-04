@@ -1,0 +1,334 @@
+---
+title: System Architecture
+description: High-level architecture of Chat2Cash showing API server, worker separation, and data flow
+---
+
+## Architecture Overview
+
+Chat2Cash follows a **decoupled API-Worker architecture** that separates HTTP request handling from compute-intensive AI processing. This design enables horizontal scaling, fault isolation, and efficient resource utilization.
+
+```
+┌─────────────┐
+│   Client    │
+└──────┬──────┘
+       │ HTTP Request
+       ▼
+┌─────────────────┐
+│   API Server    │  (Port 3000)
+│   (Express.js)  │
+└────────┬────────┘
+         │
+         ├─► PostgreSQL (Port 5432)
+         │   └─ Organizations, Orders, Customers, Products
+         │
+         ├─► Redis (Port 6379)
+         │   └─ BullMQ Job Queue
+         │
+         ▼
+┌─────────────────┐
+│  Worker Pool    │  (2+ replicas)
+│   (BullMQ)      │
+└────────┬────────┘
+         │
+         ├─► Anthropic API (Claude)
+         │   └─ AI Order Extraction
+         │
+         └─► PostgreSQL
+             └─ Save Extracted Orders
+```
+
+## Component Responsibilities
+
+### 1. API Server (`backend/src/index.ts`)
+
+**Purpose:** Handles all HTTP requests without blocking on AI inference.
+
+**Responsibilities:**
+- Authenticate requests (JWT or API Key)
+- Validate and sanitize input
+- Enforce rate limits
+- Enqueue extraction jobs to Redis
+- Return immediate responses (sync) or job IDs (async)
+- Serve order/invoice queries from PostgreSQL
+
+**Does NOT:**
+- Call Anthropic API directly
+- Run AI inference
+- Block on long-running operations
+
+**Code:** `backend/src/index.ts:7`
+
+### 2. Worker Pool (`backend/src/worker.ts`)
+
+**Purpose:** Processes AI extraction jobs from the queue.
+
+**Responsibilities:**
+- Poll BullMQ `order-extraction` queue
+- Call Anthropic API with chat messages
+- Parse AI responses into structured orders
+- Save orders to PostgreSQL
+- Retry failed jobs with exponential backoff
+- Send webhook notifications on completion
+
+**Scaling:** Workers can be scaled independently via Docker Compose replicas.
+
+**Code:** `backend/src/worker.ts:18-20`
+
+### 3. PostgreSQL Database
+
+**Purpose:** Primary data store for all business entities.
+
+**Tables:**
+- `organizations` - Multi-tenant isolation root
+- `orders` - Extracted orders with AI responses
+- `order_items` - Line items for each order
+- `customers` - Customer records
+- `products` - Product catalog
+- `business_profiles` - Tax/GST configuration
+- `users` - Authenticated users (Neon Auth)
+- `api_keys` - API key authentication
+- `roles` - Role-based permissions
+
+**Persistence:** Volume-mounted at `/var/lib/postgresql/data`
+
+**Code:** `docker-compose.yml:4-20`
+
+### 4. Redis + BullMQ
+
+**Purpose:** Job queue backend with persistence.
+
+**Configuration:**
+- **AOF (Append-Only File):** `--appendonly yes --appendfsync everysec`
+- **Persistence:** Prevents job loss on Redis crash
+- **Queues:**
+  - `order-extraction` - AI extraction jobs (3 retry attempts)
+  - `webhook-delivery` - Async webhook delivery (10 retry attempts)
+
+**Code:** `docker-compose.yml:22-36`
+
+## Data Flow
+
+### Synchronous Extraction (`POST /extract`)
+
+```
+1. Client → API Server (POST /extract)
+2. API validates orgId from JWT/API key
+3. API calls Anthropic directly
+4. API saves order to PostgreSQL
+5. API returns order JSON (200 OK)
+```
+
+**Use Case:** Real-time extraction for single messages.
+
+**Code:** `backend/src/routes/index.ts:90`
+
+### Asynchronous Extraction (`POST /async/extract`)
+
+```
+1. Client → API Server (POST /async/extract)
+2. API validates orgId from JWT/API key
+3. API enqueues job to Redis BullMQ
+4. API returns { jobId } (202 Accepted)
+5. Worker polls Redis, picks up job
+6. Worker calls Anthropic API
+7. Worker saves order to PostgreSQL
+8. Client polls GET /jobs/:id or subscribes to GET /jobs/:id/stream (SSE)
+```
+
+**Use Case:** High-volume batch processing, webhook delivery, or long-running extractions.
+
+**Code:** `backend/src/routes/index.ts:95-96`
+
+### Real-Time Job Updates (SSE)
+
+```
+1. Client connects to GET /jobs/:id/stream
+2. API polls BullMQ every 1 second
+3. API pushes Server-Sent Events with job status
+4. Connection closes when job reaches "completed" or "failed"
+```
+
+**Events:**
+- `event: status` - `{ jobId, state, progress, result, error, attempts }`
+- `event: error_event` - `{ message }` (job not found)
+
+**Code:** `backend/src/routes/index.ts:113-165`
+
+## Service Dependencies
+
+### API Server Dependencies
+
+```yaml
+db:
+  condition: service_healthy  # Must connect to PostgreSQL
+redis:
+  condition: service_healthy  # Must connect to Redis (BullMQ)
+```
+
+### Worker Dependencies
+
+```yaml
+db:
+  condition: service_healthy  # Must save orders to PostgreSQL
+redis:
+  condition: service_healthy  # Must poll BullMQ queue
+```
+
+**Code:** `docker-compose.yml:56-61, 77-81`
+
+## Scaling Strategy
+
+### Horizontal Scaling
+
+**API Server:**
+```bash
+docker-compose up --scale api=3
+```
+Load balance with Nginx/AWS ALB.
+
+**Workers:**
+```bash
+docker-compose up --scale worker=5
+```
+Workers compete for jobs in Redis - no coordination needed.
+
+**Code:** `docker-compose.yml:82-83`
+
+### Why This Works
+
+1. **Stateless API:** No in-memory state; all data in PostgreSQL/Redis
+2. **BullMQ Locking:** Redis ensures only one worker processes each job
+3. **Connection Pooling:** Drizzle ORM manages PostgreSQL connections
+
+## Fault Tolerance
+
+### API Server Failure
+
+- Load balancer redirects to healthy replicas
+- In-flight requests fail (client retries)
+- Enqueued jobs safe in Redis AOF
+
+### Worker Failure
+
+- Job returns to queue after worker timeout
+- Another worker picks up the job
+- BullMQ retries with exponential backoff
+
+### Redis Failure
+
+- AOF persistence restores queue on restart
+- API requests fail until Redis reconnects
+- Workers wait for Redis connection
+
+### PostgreSQL Failure
+
+- All services fail health checks
+- Docker Compose restarts services
+- Volume-mounted data survives crashes
+
+## Environment Variables
+
+### Shared (API + Worker)
+
+| Variable | Description | Example |
+|----------|-------------|----------|
+| `DATABASE_URL` | PostgreSQL connection string | `postgres://user:password@db:5432/chat2cash` |
+| `REDIS_URL` | Redis connection string | `redis://redis:6379` |
+| `ANTHROPIC_API_KEY` | Claude API key | `sk-ant-...` |
+| `DEFAULT_BUSINESS_NAME` | Default business name | `Chat2Cash Store` |
+| `DEFAULT_GST_NUMBER` | Default GST number | `22AAAAA0000A1Z5` |
+
+### API-Only
+
+| Variable | Description | Example |
+|----------|-------------|----------|
+| `PORT` | HTTP port | `3000` |
+| `FRONTEND_URL` | CORS origin | `http://localhost:5173` |
+| `NEON_JWKS_URL` | Neon Auth JWKS endpoint | `https://...` |
+
+**Code:** `docker-compose.yml:47-60, 70-76`
+
+## Health Checks
+
+### Database (`GET /health`)
+
+```sql
+SELECT 1
+```
+
+Returns `200 OK` if PostgreSQL is reachable.
+
+### Anthropic API (`GET /health`)
+
+```http
+HEAD https://api.anthropic.com/v1/messages
+X-API-Key: <key>
+```
+
+Returns `reachable`, `api_key_invalid`, or `unreachable`.
+
+### Queue (`GET /queue/health`)
+
+```json
+{
+  "extraction": {
+    "waiting": 5,
+    "active": 2,
+    "completed": 1234,
+    "failed": 3,
+    "delayed": 0
+  },
+  "webhook": {
+    "waiting": 1,
+    "active": 0,
+    "failed": 0
+  }
+}
+```
+
+**Code:** `backend/src/routes/index.ts:17-76, 166`
+
+## Performance Characteristics
+
+### API Server
+
+- **Request Handling:** ~5ms (excludes Anthropic API)
+- **Database Queries:** ~10-50ms (indexed lookups)
+- **Rate Limits:**
+  - Extraction: 10 requests/minute per org
+  - General: 100 requests/minute per org
+
+### Worker
+
+- **Concurrency:** 3 parallel jobs per worker
+- **Rate Limit:** 10 jobs/minute (Anthropic tier limit)
+- **Anthropic Latency:** 2-10 seconds per extraction
+- **Retry Backoff:** 3s → 9s → 27s (exponential)
+
+**Code:** `backend/src/services/queueService.ts:125-129`
+
+## Security Boundaries
+
+### API Server
+
+- Validates `req.orgId` from JWT or API key
+- Row-level security: `WHERE organizationId = req.orgId`
+- CORS: Only `FRONTEND_URL` allowed
+
+### Worker
+
+- No HTTP exposure
+- Reads `orgId` from job data (set by API)
+- Inherits org isolation from API
+
+### Redis
+
+- No authentication (internal network only)
+- Not exposed to internet
+
+### PostgreSQL
+
+- Internal network only
+- Not exposed to internet
+
+**Code:** `backend/src/middlewares/authHandler.ts:21-104`

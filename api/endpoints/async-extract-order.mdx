@@ -1,0 +1,326 @@
+---
+title: "Queue Chat Log Extraction"
+api: "POST /api/async/extract-order"
+description: "Queue a full chat conversation for asynchronous order extraction"
+---
+
+## Overview
+
+Queue a complete chat conversation for background order extraction processing. This endpoint returns immediately with a job ID, allowing you to check the status later or receive results via webhook.
+
+Use this endpoint for processing full chat conversations asynchronously, especially useful for high-volume integrations or when immediate response is not required.
+
+## Authentication
+
+Requires a valid API key in the `Authorization` header:
+
+```
+Authorization: Bearer YOUR_API_KEY
+```
+
+## Rate Limiting
+
+This endpoint uses the extraction rate limiter. Limits vary by organization tier.
+
+## Idempotency
+
+Supports idempotency via the `Idempotency-Key` header to prevent duplicate job creation:
+
+```
+Idempotency-Key: async-chat-987
+```
+
+## Request Body
+
+<ParamField body="messages" type="array" required>
+  Array of chat messages in chronological order. Must contain at least one message.
+  
+  <Expandable title="Message Object">
+    <ParamField body="sender" type="string" required>
+      Identifier for the message sender (e.g., "customer", "business", phone number, or name)
+    </ParamField>
+    
+    <ParamField body="text" type="string" required>
+      The message text content
+    </ParamField>
+  </Expandable>
+  
+  **Validation:**
+  - Array must contain at least 1 message
+  - Each message must have both `sender` and `text` fields
+</ParamField>
+
+<ParamField body="webhookUrl" type="string">
+  Optional webhook URL to receive results when processing completes
+  
+  **Webhook payload:**
+  - `POST` request sent to this URL when job completes
+  - Contains the full extracted order or error details
+  - Includes `jobId` and `status` fields
+</ParamField>
+
+## Response
+
+Returns immediately with `202 Accepted` status code and job information.
+
+<ResponseField name="status" type="string">
+  Job status (always `queued` on initial response)
+</ResponseField>
+
+<ResponseField name="jobId" type="string">
+  Unique identifier for the queued job
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="statusUrl" type="string">
+  URL path to check job status (relative path: `/api/jobs/{jobId}`)
+</ResponseField>
+
+## Example Request
+
+```bash
+curl -X POST https://api.chat2cash.com/api/async/extract-order \
+  -H "Authorization: Bearer c2c_your_api_key_here" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: async-chat-2024-03-04-001" \
+  -d '{
+    "messages": [
+      {
+        "sender": "9876543210",
+        "text": "Hi, I want to order fruits"
+      },
+      {
+        "sender": "business",
+        "text": "Hello! What would you like?"
+      },
+      {
+        "sender": "9876543210",
+        "text": "5 dozen bananas and 10 kg apples"
+      },
+      {
+        "sender": "business",
+        "text": "Sure. Delivery address?"
+      },
+      {
+        "sender": "9876543210",
+        "text": "Send to my shop at 123 Main Street, please deliver by 6 PM today"
+      }
+    ],
+    "webhookUrl": "https://yourdomain.com/webhooks/chat-order-ready"
+  }'
+```
+
+## Example Response
+
+```json
+{
+  "status": "queued",
+  "jobId": "job_z9y8x7w6v5u4t3s2",
+  "message": "Chat order extraction queued for processing",
+  "statusUrl": "/api/jobs/job_z9y8x7w6v5u4t3s2"
+}
+```
+
+## Checking Job Status
+
+You can poll the job status endpoint to check processing progress:
+
+```bash
+curl https://api.chat2cash.com/api/jobs/job_z9y8x7w6v5u4t3s2 \
+  -H "Authorization: Bearer c2c_your_api_key_here"
+```
+
+### Job Status Response
+
+```json
+{
+  "jobId": "job_z9y8x7w6v5u4t3s2",
+  "state": "completed",
+  "progress": 100,
+  "result": {
+    "id": "ord_8h7g6f5d4s3a2z1x",
+    "customer_name": null,
+    "items": [
+      {
+        "product_name": "bananas",
+        "quantity": 60,
+        "price": null
+      },
+      {
+        "product_name": "apples",
+        "quantity": 10,
+        "price": null
+      }
+    ],
+    "delivery_address": "123 Main Street",
+    "delivery_date": "2026-03-04T18:00:00.000Z",
+    "special_instructions": "Deliver by 6 PM today",
+    "total": null,
+    "confidence": "high",
+    "status": "pending",
+    "created_at": "2026-03-04T13:20:00.000Z",
+    "raw_messages": [
+      {
+        "sender": "9876543210",
+        "text": "Hi, I want to order fruits"
+      },
+      {
+        "sender": "business",
+        "text": "Hello! What would you like?"
+      },
+      {
+        "sender": "9876543210",
+        "text": "5 dozen bananas and 10 kg apples"
+      },
+      {
+        "sender": "business",
+        "text": "Sure. Delivery address?"
+      },
+      {
+        "sender": "9876543210",
+        "text": "Send to my shop at 123 Main Street, please deliver by 6 PM today"
+      }
+    ],
+    "invoice": null
+  },
+  "createdAt": "2026-03-04T13:19:30.000Z",
+  "processedAt": "2026-03-04T13:20:00.000Z"
+}
+```
+
+## Server-Sent Events (SSE) Streaming
+
+For real-time job updates without polling, use the SSE endpoint:
+
+```bash
+curl -N https://api.chat2cash.com/api/jobs/job_z9y8x7w6v5u4t3s2/stream \
+  -H "Authorization: Bearer c2c_your_api_key_here"
+```
+
+The connection will receive `status` events as the job progresses and automatically close when complete.
+
+## Webhook Notification
+
+If you provided a `webhookUrl`, you'll receive a POST request when the job completes:
+
+```json
+{
+  "jobId": "job_z9y8x7w6v5u4t3s2",
+  "state": "completed",
+  "result": {
+    "id": "ord_8h7g6f5d4s3a2z1x",
+    "customer_name": null,
+    "items": [
+      {
+        "product_name": "bananas",
+        "quantity": 60,
+        "price": null
+      },
+      {
+        "product_name": "apples",
+        "quantity": 10,
+        "price": null
+      }
+    ],
+    "delivery_address": "123 Main Street",
+    "delivery_date": "2026-03-04T18:00:00.000Z",
+    "special_instructions": "Deliver by 6 PM today",
+    "confidence": "high",
+    "status": "pending",
+    "created_at": "2026-03-04T13:20:00.000Z"
+  }
+}
+```
+
+## Job States
+
+Jobs progress through the following states:
+
+- `queued` - Job is waiting in the queue
+- `active` - Job is currently being processed
+- `completed` - Job completed successfully (result available)
+- `failed` - Job failed (error details available)
+
+## Error Responses
+
+### 400 Bad Request
+
+Returned when the request body is invalid.
+
+```json
+{
+  "error": "Validation error",
+  "details": "At least one message is required"
+}
+```
+
+### 401 Unauthorized
+
+Returned when the API key is missing or invalid.
+
+```json
+{
+  "error": "Unauthorized",
+  "message": "Invalid or missing API key"
+}
+```
+
+### 429 Too Many Requests
+
+Returned when rate limits are exceeded.
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "message": "Too many extraction requests. Please try again later."
+}
+```
+
+### 500 Internal Server Error
+
+Returned when an unexpected error occurs.
+
+```json
+{
+  "error": "Internal server error",
+  "message": "Failed to queue chat extraction job"
+}
+```
+
+## Use Cases
+
+- **WhatsApp Business API**: Process incoming chat conversations asynchronously
+- **Batch Chat Processing**: Queue multiple conversations for background processing
+- **High Volume Integration**: Handle peak loads without blocking
+- **Event-Driven Workflows**: Trigger downstream processes via webhooks
+- **Long Conversations**: Process extensive chat histories that may take longer
+
+## Best Practices
+
+- Use webhooks instead of polling when possible for better efficiency
+- Implement webhook endpoint with proper error handling and retries
+- Store the `jobId` to check status later if needed
+- Use idempotency keys to prevent duplicate job creation on retries
+- Include complete conversation context for better extraction accuracy
+- Maintain chronological message order (oldest to newest)
+- For single messages, use [/api/async/extract](/api/endpoints/async-extract) instead
+- For immediate results, use the synchronous [/api/extract-order](/api/endpoints/extract-order) endpoint
+
+## Webhook Requirements
+
+- Must be publicly accessible HTTPS endpoint
+- Should respond with 200-299 status code to acknowledge receipt
+- Will retry up to 3 times on failure with exponential backoff
+- Must accept POST requests with JSON payload
+
+## Performance Considerations
+
+Chat extraction typically takes longer than single message extraction due to:
+- Analysis of conversation context and flow
+- Inference of implicit information from dialogue
+- Resolution of references across multiple messages
+
+Expect processing times of 2-5 seconds for typical conversations, longer for extensive chat histories.

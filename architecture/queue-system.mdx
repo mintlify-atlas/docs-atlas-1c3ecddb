@@ -1,0 +1,996 @@
+---
+title: Queue System
+description: BullMQ with Redis AOF persistence, queue processors, job lifecycle, and dead letter queue (DLQ)
+---
+
+## Queue Architecture
+
+Chat2Cash uses **BullMQ** (Redis-backed job queue) to decouple API request handling from compute-intensive AI processing. This architecture enables:
+
+- **Async processing:** API returns immediately with a job ID
+- **Horizontal scaling:** Add more workers without changing the API
+- **Fault tolerance:** Jobs persist in Redis and retry on failure
+- **Rate limiting:** Respect Anthropic API tier limits
+
+**Queue Library:** BullMQ (v5)  
+**Backend:** Redis 7 with AOF persistence  
+**Implementation:** `backend/src/services/queueService.ts`
+
+## Queue Overview
+
+### Queue Definitions
+
+```typescript
+export const extractionQueue = new Queue("order-extraction", {
+  connection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: "exponential", delay: 3000 },
+    removeOnComplete: { age: 3600 * 24 },
+    removeOnFail: false,
+  },
+});
+
+export const webhookQueue = new Queue("webhook-delivery", {
+  connection,
+  defaultJobOptions: {
+    attempts: 10,
+    backoff: { type: "exponential", delay: 5000 },
+    removeOnComplete: { age: 3600 * 24 },
+    removeOnFail: { age: 3600 * 72 },
+  },
+});
+```
+
+**Code:** `backend/src/services/queueService.ts:29-47`
+
+| Queue | Purpose | Max Retries | Backoff | Retention |
+|-------|---------|-------------|---------|------------|
+| `order-extraction` | AI order extraction | 3 attempts | 3s → 9s → 27s (exponential) | Completed: 24h, Failed: Forever (DLQ) |
+| `webhook-delivery` | Async webhook delivery | 10 attempts | 5s → 15s → 45s → ... (exponential) | Completed: 24h, Failed: 72h |
+
+**Why Separate Queues?**
+
+- **Different retry policies:** Extraction jobs fail fast (AI errors unlikely to resolve), webhooks retry aggressively (transient network errors)
+- **Priority handling:** Extraction queue has rate limiting; webhooks don't
+- **Observability:** Separate metrics and DLQ for each queue
+
+---
+
+## Redis Configuration
+
+### AOF Persistence
+
+**Docker Compose Configuration:**
+
+```yaml
+redis:
+  image: redis:7-alpine
+  command: redis-server --appendonly yes --appendfsync everysec
+  volumes:
+    - redis_data:/data
+```
+
+**Code:** `docker-compose.yml:22-31`
+
+**AOF Settings:**
+
+| Setting | Value | Purpose |
+|---------|-------|----------|
+| `--appendonly yes` | Enabled | Write all commands to append-only file |
+| `--appendfsync everysec` | Every second | Fsync to disk every 1 second (balance between durability and performance) |
+
+**Durability Guarantee:**
+
+- **Crash at T+0.5s:** Last 0.5s of jobs may be lost
+- **Crash at T+1s:** All jobs up to T+0s are persisted
+- **Restart:** Redis replays AOF file to restore queue state
+
+**Alternative: `--appendfsync always`** (slower but zero data loss)
+
+---
+
+### BullMQ Redis Connection
+
+**Dedicated Connection:**
+
+```typescript
+import IORedis from "ioredis";
+
+const connection = new IORedis(env.REDIS_URL, {
+  maxRetriesPerRequest: null, // Required by BullMQ
+});
+```
+
+**Code:** `backend/src/services/queueService.ts:16-18`
+
+**Why `maxRetriesPerRequest: null`?**
+
+BullMQ requires infinite retries at the Redis client level (it handles retries internally).
+
+**Connection Events:**
+
+```typescript
+connection.on("error", (err) => {
+  logger.error({ err }, "BullMQ Redis connection error");
+});
+
+connection.on("connect", () => {
+  logger.info("BullMQ Redis connected for job queue");
+});
+```
+
+**Code:** `backend/src/services/queueService.ts:20-26`
+
+---
+
+## Job Types
+
+### Extraction Job Data
+
+```typescript
+export interface ExtractionJobData {
+  type: "single_message" | "chat_log";
+  orgId: string;
+  correlationId?: string;
+  message?: string;
+  messages?: ChatMessage[];
+  webhookUrl?: string;
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:50-57`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | `"single_message" \| "chat_log"` | Yes | Extraction method |
+| `orgId` | `string` | Yes | Organization ID (for multi-tenant isolation) |
+| `correlationId` | `string` | No | Request tracing ID (for logs/debugging) |
+| `message` | `string` | If `type=single_message` | Single message text |
+| `messages` | `ChatMessage[]` | If `type=chat_log` | Array of chat messages |
+| `webhookUrl` | `string` | No | Webhook URL for async delivery |
+
+### Extraction Job Result
+
+```typescript
+export interface ExtractionJobResult {
+  orderId: string;
+  status: "completed" | "failed";
+  error?: string;
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:59-63`
+
+### Webhook Job Data
+
+```typescript
+export interface WebhookJobData {
+  webhookUrl: string;
+  payload: Record<string, unknown>;
+  correlationId?: string;
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:65-69`
+
+---
+
+## Extraction Worker
+
+### Worker Configuration
+
+```typescript
+worker = new Worker<ExtractionJobData, ExtractionJobResult>(
+  "order-extraction",
+  async (job: Job<ExtractionJobData, ExtractionJobResult>) => {
+    // Job processing logic
+  },
+  {
+    connection,
+    concurrency: 3, // Process up to 3 extractions in parallel
+    limiter: {
+      max: 10,       // Max 10 jobs
+      duration: 60000, // per minute (respects Anthropic rate limits)
+    },
+  }
+);
+```
+
+**Code:** `backend/src/services/queueService.ts:77-131`
+
+| Setting | Value | Purpose |
+|---------|-------|----------|
+| `concurrency` | 3 | Process 3 jobs in parallel (per worker replica) |
+| `limiter.max` | 10 | Max 10 jobs per minute (Anthropic tier 1 rate limit) |
+| `limiter.duration` | 60000ms | Rate limit window (1 minute) |
+
+**Scaling Math:**
+
+- **1 worker replica:** 3 concurrent jobs, 10 jobs/min = ~20s per job
+- **2 worker replicas:** 6 concurrent jobs, 10 jobs/min = ~10s per job
+- **5 worker replicas:** 15 concurrent jobs, 10 jobs/min = ~4s per job
+
+**Rate limit applies globally** (shared across all replicas via Redis).
+
+---
+
+### Job Processing Flow
+
+```typescript
+async (job: Job<ExtractionJobData, ExtractionJobResult>) => {
+  const cid = job.data.correlationId ?? job.id;
+  logger.info({ jobId: job.id, type: job.data.type, correlationId: cid }, "Processing extraction job");
+
+  await job.updateProgress(10);
+
+  let savedOrder;
+  const { orgId } = job.data;
+  if (!orgId) throw new Error("Invalid job data: missing orgId");
+
+  if (job.data.type === "single_message" && job.data.message) {
+    const order = await anthropicService.extractOrderFromMessage(job.data.message);
+    await job.updateProgress(70);
+    savedOrder = await storage.addOrder(orgId, order);
+  } else if (job.data.type === "chat_log" && job.data.messages) {
+    const order = await anthropicService.extractOrderFromChat(job.data.messages);
+    await job.updateProgress(70);
+    savedOrder = await storage.addChatOrder(orgId, order);
+  } else {
+    throw new Error("Invalid job data: missing message or messages");
+  }
+
+  await job.updateProgress(90);
+
+  // Enqueue webhook delivery to a separate queue
+  if (job.data.webhookUrl) {
+    await webhookQueue.add("deliver", {
+      webhookUrl: job.data.webhookUrl,
+      correlationId: cid,
+      payload: {
+        jobId: job.id,
+        status: "completed",
+        orderId: savedOrder.id,
+        order: savedOrder,
+      },
+    });
+    logger.info({ jobId: job.id, correlationId: cid }, "Webhook delivery enqueued");
+  }
+
+  await job.updateProgress(100);
+
+  return { orderId: savedOrder.id, status: "completed" };
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:79-122`
+
+**Job Lifecycle:**
+
+1. **Start (Progress: 10%)** - Job picked up by worker
+2. **AI Extraction (Progress: 70%)** - Anthropic API call completes
+3. **Database Save (Progress: 90%)** - Order saved to PostgreSQL
+4. **Webhook Enqueue (Progress: 100%)** - Webhook job added to `webhook-delivery` queue (if provided)
+5. **Complete** - Job result returned
+
+**Error Handling:**
+
+- `throw new Error()` → Job marked as "failed" and retried
+- After 3 attempts → Job moves to DLQ (dead letter queue)
+
+---
+
+### Worker Events
+
+**Job Completed:**
+
+```typescript
+worker.on("completed", (job, result) => {
+  logger.info({ jobId: job.id, orderId: result.orderId }, "Extraction job completed");
+});
+```
+
+**Code:** `backend/src/services/queueService.ts:133-135`
+
+**Job Failed:**
+
+```typescript
+worker.on("failed", (job, err) => {
+  const isFinalAttempt = job !== undefined &&
+    job.attemptsMade >= (job.opts.attempts ?? 1);
+
+  if (isFinalAttempt) {
+    // Alert on hard-fail (all retries exhausted) so the team sees it immediately
+    logger.error({ jobId: job?.id, err }, "Extraction job hard-failed (DLQ)");
+    if (env.SENTRY_DSN) {
+      Sentry.captureException(err, {
+        tags: { queue: "order-extraction", jobId: job?.id ?? "unknown" },
+        extra: {
+          orgId: job?.data.orgId,
+          type: job?.data.type,
+          correlationId: job?.data.correlationId,
+          attemptsMade: job?.attemptsMade,
+        },
+      });
+    }
+  } else {
+    logger.warn({ jobId: job?.id, attempt: job?.attemptsMade, err }, "Extraction job failed (will retry)");
+  }
+
+  // Enqueue failure webhook so the worker doesn't block
+  if (job?.data.webhookUrl) {
+    webhookQueue.add("deliver", {
+      webhookUrl: job.data.webhookUrl,
+      correlationId: job.data.correlationId ?? job.id,
+      payload: {
+        jobId: job.id,
+        status: "failed",
+        error: err.message,
+      },
+    }).catch((enqueueErr) => {
+      logger.error({ jobId: job.id, err: enqueueErr }, "Failed to enqueue failure webhook");
+    });
+  }
+});
+```
+
+**Code:** `backend/src/services/queueService.ts:137-173`
+
+**Failure Scenarios:**
+
+1. **Transient failure (attempt 1/3):** Log warning, retry in 3 seconds
+2. **Transient failure (attempt 2/3):** Log warning, retry in 9 seconds
+3. **Final failure (attempt 3/3):** Log error, send to Sentry, move to DLQ, enqueue failure webhook
+
+---
+
+## Webhook Worker
+
+### Worker Configuration
+
+```typescript
+webhookWorker = new Worker<WebhookJobData>(
+  "webhook-delivery",
+  async (job: Job<WebhookJobData>) => {
+    // Webhook delivery logic
+  },
+  {
+    connection,
+    concurrency: 5,
+  }
+);
+```
+
+**Code:** `backend/src/services/queueService.ts:189-231`
+
+| Setting | Value | Purpose |
+|---------|-------|----------|
+| `concurrency` | 5 | Process 5 webhooks in parallel |
+| `attempts` | 10 | Max 10 retry attempts (from queue defaults) |
+| `backoff` | 5s exponential | 5s → 15s → 45s → ... |
+
+---
+
+### Webhook Delivery Logic
+
+```typescript
+async (job: Job<WebhookJobData>) => {
+  const { webhookUrl, payload, correlationId } = job.data;
+  logger.info({ jobId: job.id, webhookUrl, correlationId }, "Delivering webhook");
+
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Correlation-Id": correlationId ?? "",
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(10_000), // 10s timeout
+  });
+
+  if (!response.ok) {
+    const status = response.status;
+
+    // 4xx errors (except 408 Request Timeout and 429 Too Many Requests) are
+    // permanent client-side failures — retrying will never succeed, so drop
+    // the job immediately to avoid wasting up to 10 retry attempts.
+    const isRetryable =
+      status === 408 ||   // Request Timeout
+      status === 429 ||   // Too Many Requests
+      status >= 500;      // Server Error (transient)
+
+    if (!isRetryable) {
+      throw new UnrecoverableError(
+        `Webhook permanently failed with ${status} ${response.statusText} — dropping job (non-retryable client error)`
+      );
+    }
+
+    throw new Error(`Webhook returned ${status}: ${response.statusText}`);
+  }
+
+  logger.info({ jobId: job.id, correlationId }, "Webhook delivered successfully");
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:191-226`
+
+**Retry Logic:**
+
+| HTTP Status | Retry? | Reason |
+|-------------|--------|--------|
+| `200-299` | No | Success |
+| `400-407, 410-428, 430-499` | No | Permanent client error (bad request) |
+| `408` (Request Timeout) | Yes | Transient network issue |
+| `429` (Too Many Requests) | Yes | Rate limit (backoff will help) |
+| `500-599` | Yes | Transient server error |
+
+**Why Drop Non-Retryable Errors?**
+
+- Avoids wasting 10 retry attempts on a 404 or 401
+- Uses BullMQ's `UnrecoverableError` to immediately move job to "failed" state
+
+**Code:** `backend/src/services/queueService.ts:206-222`
+
+---
+
+### Webhook Failure Handling
+
+```typescript
+webhookWorker.on("failed", (job, err) => {
+  const isFinalAttempt = job !== undefined &&
+    job.attemptsMade >= (job.opts.attempts ?? 1);
+  const isUnrecoverable = err instanceof UnrecoverableError;
+
+  if (isFinalAttempt || isUnrecoverable) {
+    logger.error(
+      { jobId: job?.id, webhookUrl: job?.data.webhookUrl, err: err.message },
+      `Webhook delivery hard-failed${isUnrecoverable ? " (unrecoverable)" : " (retries exhausted)"}`
+    );
+    if (env.SENTRY_DSN) {
+      Sentry.captureException(err, {
+        tags: {
+          queue: "webhook-delivery",
+          jobId: job?.id ?? "unknown",
+          unrecoverable: String(isUnrecoverable),
+        },
+        extra: {
+          webhookUrl: job?.data.webhookUrl,
+          correlationId: job?.data.correlationId,
+          attemptsMade: job?.attemptsMade,
+        },
+      });
+    }
+  } else {
+    logger.warn(
+      { jobId: job?.id, attempt: job?.attemptsMade, maxAttempts: 10, err: err.message },
+      "Webhook delivery failed (will retry)"
+    );
+  }
+});
+```
+
+**Code:** `backend/src/services/queueService.ts:233-263`
+
+---
+
+## Job Lifecycle
+
+### Job States
+
+```
+waiting → active → completed
+                 ↘ failed → waiting (retry)
+                          ↘ failed (DLQ after max attempts)
+```
+
+| State | Description |
+|-------|-------------|
+| `waiting` | Job enqueued, waiting for worker |
+| `active` | Worker processing job |
+| `completed` | Job succeeded, result returned |
+| `failed` | Job failed, will retry or move to DLQ |
+| `delayed` | Job scheduled for future execution (not used in Chat2Cash) |
+
+### Enqueuing a Job
+
+```typescript
+export async function addExtractionJob(data: ExtractionJobData): Promise<string> {
+  const correlationId = data.correlationId ?? getCorrelationId();
+
+  const job = await extractionQueue.add("extract", { ...data, correlationId }, {
+    priority: data.type === "single_message" ? 1 : 2,
+  });
+
+  logger.info({ jobId: job.id, type: data.type, correlationId }, "Extraction job enqueued");
+  return job.id!;
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:275-284`
+
+**Priority:**
+
+- `single_message` jobs: Priority 1 (higher)
+- `chat_log` jobs: Priority 2 (lower)
+
+---
+
+### Checking Job Status
+
+```typescript
+export async function getJobStatus(jobId: string) {
+  const job = await Job.fromId(extractionQueue, jobId);
+  
+  if (!job) return null;
+
+  const state = await job.getState();
+  const progress = job.progress;
+
+  return {
+    jobId: job.id,
+    state,
+    progress,
+    result: state === "completed" ? job.returnvalue : undefined,
+    error: state === "failed" ? job.failedReason : undefined,
+    createdAt: new Date(job.timestamp).toISOString(),
+    processedAt: job.processedOn ? new Date(job.processedOn).toISOString() : undefined,
+    completedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : undefined,
+    attempts: job.attemptsMade,
+  };
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:286-305`
+
+**API Endpoint:** `GET /jobs/:id`  
+**Code:** `backend/src/routes/index.ts:99`
+
+**Response Example:**
+
+```json
+{
+  "jobId": "123",
+  "state": "active",
+  "progress": 70,
+  "createdAt": "2025-03-04T12:34:56.789Z",
+  "processedAt": "2025-03-04T12:35:01.234Z",
+  "attempts": 1
+}
+```
+
+---
+
+## Queue Health Monitoring
+
+### Health Check Endpoint
+
+```typescript
+export async function getQueueHealth() {
+  const [waiting, active, completed, failed, delayed] = await Promise.all([
+    extractionQueue.getWaitingCount(),
+    extractionQueue.getActiveCount(),
+    extractionQueue.getCompletedCount(),
+    extractionQueue.getFailedCount(),
+    extractionQueue.getDelayedCount(),
+  ]);
+  
+  const [whWaiting, whActive, whFailed] = await Promise.all([
+    webhookQueue.getWaitingCount(),
+    webhookQueue.getActiveCount(),
+    webhookQueue.getFailedCount(),
+  ]);
+
+  return {
+    extraction: { waiting, active, completed, failed, delayed },
+    webhook: { waiting: whWaiting, active: whActive, failed: whFailed },
+  };
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:307-326`
+
+**API Endpoint:** `GET /queue/health`  
+**Code:** `backend/src/routes/index.ts:166`
+
+**Response Example:**
+
+```json
+{
+  "extraction": {
+    "waiting": 5,
+    "active": 2,
+    "completed": 1234,
+    "failed": 3,
+    "delayed": 0
+  },
+  "webhook": {
+    "waiting": 1,
+    "active": 0,
+    "failed": 0
+  }
+}
+```
+
+---
+
+## Dead Letter Queue (DLQ)
+
+### What is a DLQ?
+
+A **Dead Letter Queue** holds jobs that failed after exhausting all retry attempts. These jobs require manual investigation or reprocessing.
+
+**Configuration:**
+
+```typescript
+defaultJobOptions: {
+  attempts: 3,
+  removeOnFail: false, // Keep failed jobs in Redis
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:32-36`
+
+---
+
+### Viewing Failed Jobs
+
+```typescript
+export async function getFailedJobs(start = 0, end = 20) {
+  const jobs = await extractionQueue.getFailed(start, end);
+  return jobs.map((job) => ({
+    jobId: job.id,
+    type: job.data.type,
+    orgId: job.data.orgId,
+    error: job.failedReason,
+    attempts: job.attemptsMade,
+    failedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : undefined,
+    correlationId: job.data.correlationId,
+  }));
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:331-342`
+
+**API Endpoint:** `GET /admin/dlq?start=0&end=20`  
+**Code:** `backend/src/routes/index.ts:174-179`
+
+**Response Example:**
+
+```json
+{
+  "count": 3,
+  "jobs": [
+    {
+      "jobId": "456",
+      "type": "chat_log",
+      "orgId": "org_abc",
+      "error": "Anthropic API rate limit exceeded",
+      "attempts": 3,
+      "failedAt": "2025-03-04T12:40:00.000Z",
+      "correlationId": "req_xyz"
+    }
+  ]
+}
+```
+
+---
+
+### Retrying Failed Jobs
+
+**Retry Single Job:**
+
+```typescript
+export async function retryFailedJob(jobId: string): Promise<boolean> {
+  const job = await Job.fromId(extractionQueue, jobId);
+  if (!job) return false;
+
+  const state = await job.getState();
+  if (state !== "failed") return false;
+
+  await job.retry();
+  logger.info({ jobId }, "DLQ: Job retried");
+  return true;
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:345-355`
+
+**API Endpoint:** `POST /admin/dlq/:jobId/retry`  
+**Code:** `backend/src/routes/index.ts:181-187`
+
+---
+
+**Retry All Failed Jobs:**
+
+```typescript
+export async function retryAllFailedJobs(): Promise<number> {
+  const failed = await extractionQueue.getFailed(0, 1000);
+  let retried = 0;
+  for (const job of failed) {
+    try {
+      await job.retry();
+      retried++;
+    } catch {
+      // Job may have been removed or already retried
+    }
+  }
+  logger.info({ count: retried }, "DLQ: Bulk retry completed");
+  return retried;
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:358-371`
+
+**API Endpoint:** `POST /admin/dlq/retry-all`  
+**Code:** `backend/src/routes/index.ts:189-192`
+
+---
+
+## Graceful Shutdown
+
+### Worker Shutdown Sequence
+
+```typescript
+export async function shutdownQueue() {
+  if (worker) {
+    await worker.close();
+    worker = null; // reset singleton so startExtractionWorker() can reinitialise cleanly
+    logger.info("Extraction worker shut down");
+  }
+  if (webhookWorker) {
+    await webhookWorker.close();
+    webhookWorker = null; // reset singleton
+    logger.info("Webhook worker shut down");
+  }
+  await extractionQueue.close();
+  await webhookQueue.close();
+  await connection.quit();
+  logger.info("Queue and Redis connections closed");
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:374-389`
+
+**Shutdown Process:**
+
+1. Worker stops accepting new jobs
+2. Worker finishes in-flight jobs (graceful drain)
+3. Queues closed
+4. Redis connection closed
+
+**Signal Handling:**
+
+```typescript
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+```
+
+**Code:** `backend/src/worker.ts:35-36`
+
+---
+
+## Performance Tuning
+
+### Concurrency vs. Rate Limits
+
+**Current Settings:**
+
+- **Extraction worker concurrency:** 3 jobs per worker
+- **Rate limit:** 10 jobs/minute (Anthropic tier 1 limit)
+
+**Scaling Example:**
+
+| Worker Replicas | Total Concurrency | Jobs/Minute | Avg Job Time |
+|-----------------|-------------------|-------------|---------------|
+| 1 | 3 | 10 | ~18s |
+| 2 | 6 | 10 | ~9s |
+| 5 | 15 | 10 | ~4s |
+
+**Bottleneck:** Rate limiter (10 jobs/min) becomes the bottleneck beyond 2 replicas.
+
+**To Scale Further:**
+
+1. Upgrade Anthropic tier (higher rate limits)
+2. Increase `limiter.max` in `queueService.ts:127`
+
+---
+
+### Redis Memory Usage
+
+**Memory Per Job:**
+
+- Extraction job: ~5KB (chat messages + AI response)
+- Webhook job: ~2KB (payload)
+
+**Retention Policy:**
+
+- Completed jobs: 24 hours
+- Failed jobs: Forever (DLQ)
+
+**Estimated Memory:**
+
+- 10,000 completed jobs: ~50MB
+- 100 failed jobs: ~500KB
+
+**Redis AOF File Size:**
+
+- Grows unbounded without compaction
+- Run `BGREWRITEAOF` periodically to compact
+
+---
+
+## Observability
+
+### Logging
+
+All queue operations log to structured JSON:
+
+```json
+{
+  "level": "info",
+  "jobId": "123",
+  "type": "chat_log",
+  "correlationId": "req_xyz",
+  "message": "Processing extraction job"
+}
+```
+
+**Correlation ID:** Traces a request across API → Queue → Worker → Webhook.
+
+**Code:** `backend/src/services/queueService.ts:81, 116, 134, 193`
+
+---
+
+### Metrics (Future)
+
+**BullMQ Metrics (Prometheus/Grafana):**
+
+- `bullmq_jobs_waiting` - Jobs in waiting state
+- `bullmq_jobs_active` - Jobs being processed
+- `bullmq_jobs_completed` - Total completed jobs
+- `bullmq_jobs_failed` - Total failed jobs
+- `bullmq_job_duration_seconds` - Job processing time
+
+**Example Dashboard Queries:**
+
+```promql
+# Job throughput (jobs/min)
+rate(bullmq_jobs_completed[1m])
+
+# Failure rate
+rate(bullmq_jobs_failed[5m]) / rate(bullmq_jobs_completed[5m])
+
+# Queue backlog
+bullmq_jobs_waiting
+```
+
+---
+
+## Troubleshooting
+
+### Job Stuck in "Waiting" State
+
+**Cause:** No active workers or rate limit reached.
+
+**Fix:**
+
+1. Check worker health: `docker-compose ps worker`
+2. Check rate limiter: `GET /queue/health` (if `active=0` and `waiting>0`, rate limit is blocking)
+
+---
+
+### Job Fails Immediately (0 retries)
+
+**Cause:** `UnrecoverableError` thrown in job processor.
+
+**Fix:** Check job failure reason in DLQ (`GET /admin/dlq`).
+
+---
+
+### Redis Out of Memory
+
+**Cause:** Too many jobs retained or AOF file too large.
+
+**Fix:**
+
+1. Reduce retention: `removeOnComplete: { age: 3600 }` (1 hour)
+2. Clear old jobs: `await extractionQueue.clean(3600 * 24, 1000, "completed")`
+3. Compact AOF: `redis-cli BGREWRITEAOF`
+
+---
+
+### Webhook Delivery Fails with Timeout
+
+**Cause:** Webhook endpoint is slow (>10s).
+
+**Fix:** Increase timeout in `queueService.ts:202`:
+
+```typescript
+signal: AbortSignal.timeout(30_000), // 30s timeout
+```
+
+---
+
+## Security Considerations
+
+### Redis Access Control
+
+- **No AUTH enabled** (internal network only)
+- **Not exposed to internet** (Docker internal network)
+
+**Production:** Enable Redis AUTH with `REDIS_PASSWORD` env var.
+
+---
+
+### Job Data Sanitization
+
+- Input sanitized at API layer (`backend/src/middlewares/sanitizer.ts`)
+- PII redacted before enqueueing (`backend/src/middlewares/piiRedactor.ts`)
+
+---
+
+### Webhook Security
+
+**No Authentication:** Webhooks are unauthenticated HTTP POST requests.
+
+**Future Enhancements:**
+
+1. **HMAC signatures:** Sign webhook payloads with shared secret
+2. **Webhook secrets:** Store per-org webhook secrets in database
+3. **Retry backoff:** Exponential backoff prevents DDoS on webhook endpoints
+
+---
+
+## Future Enhancements
+
+### Scheduled Jobs
+
+Use BullMQ's `repeat` option for recurring jobs:
+
+```typescript
+await extractionQueue.add("scheduled-report", data, {
+  repeat: { cron: "0 9 * * *" }, // Daily at 9am
+});
+```
+
+### Priority Queues
+
+Already implemented via `priority` option:
+
+```typescript
+await extractionQueue.add("extract", data, {
+  priority: 1, // Higher priority = processed first
+});
+```
+
+**Code:** `backend/src/services/queueService.ts:279`
+
+### Job Dependencies
+
+BullMQ supports job dependencies (parent → child):
+
+```typescript
+const parentJob = await extractionQueue.add("extract", data);
+
+await webhookQueue.add("deliver", webhookData, {
+  parent: { id: parentJob.id, queue: extractionQueue.name },
+});
+```
+
+**Use Case:** Only send webhook after extraction completes (already implemented manually).
+
+---
+
+## Code References
+
+| Component | File | Lines |
+|-----------|------|-------|
+| Queue definitions | `backend/src/services/queueService.ts` | 29-47 |
+| Extraction worker | `backend/src/services/queueService.ts` | 74-181 |
+| Webhook worker | `backend/src/services/queueService.ts` | 186-271 |
+| Job status | `backend/src/services/queueService.ts` | 286-305 |
+| Queue health | `backend/src/services/queueService.ts` | 307-326 |
+| DLQ management | `backend/src/services/queueService.ts` | 331-371 |
+| Worker startup | `backend/src/worker.ts` | 18-20 |
+| Redis config | `docker-compose.yml` | 22-36 |
+| API routes | `backend/src/routes/index.ts` | 95-96, 99, 166, 174-192 |

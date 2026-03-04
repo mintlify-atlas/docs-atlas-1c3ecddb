@@ -1,0 +1,1069 @@
+---
+title: Multi-Tenant Architecture
+description: Organization-based isolation, API key authentication, and role-based permissions
+---
+
+## Multi-Tenancy Overview
+
+Chat2Cash is a **multi-tenant SaaS application** where each organization has its own isolated data. All database queries enforce tenant isolation via `organization_id` foreign keys.
+
+**Isolation Model:** Shared database, shared schema, row-level filtering  
+**Root Entity:** `organizations` table  
+**Enforcement:** Application-level (Drizzle ORM queries)
+
+## Tenant Hierarchy
+
+```
+organizations (tenant root)
+    ├─► business_profiles (1:1)
+    ├─► customers (1:many)
+    ├─► products (1:many)
+    ├─► orders (1:many)
+    │      └─► order_items (1:many)
+    ├─► users (1:many)
+    ├─► api_keys (1:many)
+    └─► roles (1:many)
+```
+
+Every data record belongs to exactly one organization. Queries filter by `organization_id` to prevent cross-tenant data leaks.
+
+---
+
+## Organizations Table
+
+### Schema
+
+```typescript
+export const organizationsTable = pgTable("organizations", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  gstNumber: text("gst_number"),
+  tier: text("tier").default("free").notNull(),
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+});
+```
+
+**Code:** `backend/src/schema.ts:104-110`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `text` | Unique org ID (e.g., `org_abc123`) |
+| `name` | `text` | Organization name |
+| `gst_number` | `text` | GST registration number (India) |
+| `tier` | `text` | Subscription tier (`free`, `pro`, `enterprise`) |
+| `created_at` | `timestamp` | Creation timestamp |
+
+### Tier-Based Features (Future)
+
+| Tier | Orders/Month | Workers | API Keys | Webhooks |
+|------|--------------|---------|----------|----------|
+| Free | 100 | 1 | 1 | No |
+| Pro | 10,000 | 5 | 10 | Yes |
+| Enterprise | Unlimited | Unlimited | Unlimited | Yes |
+
+**Enforcement:** Rate limiters check `organization.tier` to enforce limits.
+
+---
+
+## Authentication Methods
+
+Chat2Cash supports two authentication methods:
+
+1. **JWT (Neon Auth)** - Human users via OAuth/email
+2. **API Keys** - Machine-to-machine access
+
+Both methods set `req.orgId` on the Express request object, enabling tenant filtering.
+
+---
+
+## JWT Authentication (Neon Auth)
+
+### Flow
+
+```
+1. User logs in via Neon Auth (OAuth/email)
+2. Neon Auth issues JWT with claims: { sub: userId, email, name }
+3. Client sends: Authorization: Bearer <jwt>
+4. API verifies JWT signature using Neon JWKS endpoint
+5. API upserts user to local `users` table (JIT provisioning)
+6. API sets: req.user = user, req.orgId = user.organizationId
+7. API enforces: WHERE organizationId = req.orgId
+```
+
+**Code:** `backend/src/middlewares/authHandler.ts:60-94`
+
+### JWT Verification
+
+```typescript
+import { createRemoteJWKSet, jwtVerify } from "jose";
+
+const JWKS = createRemoteJWKSet(new URL(env.NEON_JWKS_URL));
+
+export const authHandler = async (req: Request, res: Response, next: NextFunction) => {
+  const authHeader = req.headers.authorization;
+
+  if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.split(" ")[1];
+
+    try {
+      const { payload } = await jwtVerify(token, JWKS);
+
+      const userId = payload.sub as string;
+      const userEmail = payload.email as string;
+
+      // Atomic JIT sync: upsert user in local DB on first login
+      const [user] = await db
+        .insert(usersTable)
+        .values({
+          id: userId,
+          email: userEmail,
+          name: (payload.name as string) ?? "Unknown",
+        })
+        .onConflictDoUpdate({
+          target: usersTable.id,
+          set: {
+            email: userEmail,
+            name: (payload.name as string) ?? "Unknown",
+          },
+        })
+        .returning();
+
+      req.user = user;
+
+      // Set org context from the user record
+      if (req.user?.organizationId) {
+        req.orgId = req.user.organizationId;
+      }
+
+      return next();
+    } catch (jwtError) {
+      throw new AppError("Invalid or Expired Token", 401);
+    }
+  }
+
+  throw new AppError("Authentication required", 401);
+};
+```
+
+**Code:** `backend/src/middlewares/authHandler.ts:60-100`
+
+**Key Points:**
+
+1. **Remote JWKS:** API fetches Neon's public keys to verify JWT signatures
+2. **JIT Provisioning:** Users are upserted on first login (no pre-registration)
+3. **Atomic Upsert:** `INSERT ... ON CONFLICT DO UPDATE` prevents race conditions
+4. **Org Assignment:** Admin must assign `organizationId` via dashboard (NULL by default)
+
+---
+
+### User Onboarding Flow
+
+```
+1. User logs in → JWT issued by Neon Auth
+2. API upserts user to `users` table (organizationId = NULL)
+3. User sees "Not part of an organization" error
+4. Admin invites user via dashboard → sets user.organizationId = "org_abc"
+5. User logs in again → req.orgId = "org_abc"
+6. User can now access orders, products, etc.
+```
+
+**Middleware Enforcement:**
+
+```typescript
+export const requireOrg = (req: Request, res: Response, next: NextFunction) => {
+  if (!req.orgId) {
+    return next(new AppError("User is not part of an Organization", 403));
+  }
+  next();
+};
+```
+
+**Code:** `backend/src/middlewares/authHandler.ts:106-111`
+
+**Applied to Routes:**
+
+```typescript
+router.get("/orders", generalLimiter, requireOrg, orderController.getOrders);
+router.post("/extract", extractLimiter, requireOrg, orderController.extractOrder);
+```
+
+**Code:** `backend/src/routes/index.ts:82-92`
+
+---
+
+## API Key Authentication
+
+### Flow
+
+```
+1. Admin generates API key via dashboard
+2. API computes SHA-256 hash, stores in `api_keys` table
+3. API returns plaintext key to admin (shown once)
+4. Client sends: X-API-Key: sk-abc123...
+5. API computes SHA-256(sk-abc123...)
+6. API queries: SELECT * FROM api_keys WHERE key_hash = <hash> AND is_active = true
+7. API verifies hash using constant-time comparison
+8. API sets: req.orgId = apiKey.organizationId
+9. API enforces: WHERE organizationId = req.orgId
+```
+
+**Code:** `backend/src/middlewares/authHandler.ts:27-56`
+
+### API Key Schema
+
+```typescript
+export const apiKeysTable = pgTable("api_keys", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").references(() => organizationsTable.id).notNull(),
+  keyHash: text("key_hash").notNull(),
+  name: text("name").notNull(),
+  maskedKey: text("masked_key").notNull(),
+  isActive: boolean("is_active").default(true).notNull(),
+  lastUsedAt: timestamp("last_used_at", { mode: 'string' }),
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+}, (table) => {
+  return {
+    hashIdx: index("api_key_hash_idx").on(table.keyHash),
+  };
+});
+```
+
+**Code:** `backend/src/schema.ts:223-236`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `text` | API key ID |
+| `organization_id` | `text` | Owning organization |
+| `key_hash` | `text` | SHA-256 hash of API key (indexed) |
+| `name` | `text` | Human-readable key name |
+| `masked_key` | `text` | Masked key for display (e.g., `sk-...abc123`) |
+| `is_active` | `boolean` | Revocation flag |
+| `last_used_at` | `timestamp` | Last usage timestamp |
+| `created_at` | `timestamp` | Creation timestamp |
+
+---
+
+### Security: Constant-Time Comparison
+
+**Why Constant-Time?**
+
+Prevents **timing attacks** where an attacker infers hash byte values by measuring response times.
+
+```typescript
+import crypto from "crypto";
+
+// Compute hash as a Buffer so we can use timingSafeEqual below
+const incomingHash = crypto.createHash("sha256").update(apiKeyHeader).digest();
+const incomingHashHex = incomingHash.toString("hex");
+
+// Fetch by hash (indexed column)
+const result = await db
+  .select({ orgId: apiKeysTable.organizationId, keyHash: apiKeysTable.keyHash })
+  .from(apiKeysTable)
+  .where(and(eq(apiKeysTable.keyHash, incomingHashHex), eq(apiKeysTable.isActive, true)))
+  .limit(1);
+
+if (result.length === 0) throw new AppError("Invalid API Key", 401);
+
+// Constant-time comparison — prevents timing side-channel attacks
+const storedHash = Buffer.from(result[0].keyHash, "hex");
+if (
+  storedHash.length !== incomingHash.length ||
+  !crypto.timingSafeEqual(incomingHash, storedHash)
+) {
+  throw new AppError("Invalid API Key", 401);
+}
+
+req.orgId = result[0].orgId;
+return next();
+```
+
+**Code:** `backend/src/middlewares/authHandler.ts:29-56`
+
+**Attack Scenario Without Constant-Time:**
+
+```
+Attacker tries: sk-aaa... → 50ms response (hash mismatch detected early)
+Attacker tries: sk-abc... → 52ms response (hash match for first byte, more checks)
+→ Attacker infers first byte is 'a', then 'b', then 'c'
+```
+
+**With Constant-Time:**
+
+```
+All invalid keys → 50ms response (same time for all mismatches)
+→ Attacker cannot infer hash byte values
+```
+
+---
+
+### API Key Generation (Example)
+
+```typescript
+import crypto from "crypto";
+
+function generateApiKey(): string {
+  const randomBytes = crypto.randomBytes(32);
+  return `sk-${randomBytes.toString("base64url")}`;
+}
+
+function hashApiKey(key: string): string {
+  return crypto.createHash("sha256").update(key).digest("hex");
+}
+
+// Generate key
+const apiKey = generateApiKey(); // sk-abc123...
+const keyHash = hashApiKey(apiKey); // SHA-256 hash
+
+// Store in database
+await db.insert(apiKeysTable).values({
+  id: "key_xyz",
+  organizationId: "org_abc",
+  keyHash,
+  name: "Production API Key",
+  maskedKey: `sk-...${apiKey.slice(-6)}`, // sk-...abc123
+  isActive: true,
+});
+
+// Return plaintext key to user (shown once)
+return { apiKey };
+```
+
+**Never Stored:** The plaintext key is never stored in the database. Only the hash is stored.
+
+---
+
+### Revoking API Keys
+
+```typescript
+await db
+  .update(apiKeysTable)
+  .set({ isActive: false })
+  .where(eq(apiKeysTable.id, keyId));
+```
+
+Revoked keys are rejected at the auth layer:
+
+```typescript
+eq(apiKeysTable.isActive, true) // Only active keys
+```
+
+**Code:** `backend/src/middlewares/authHandler.ts:40`
+
+---
+
+## Tenant Isolation Enforcement
+
+### Application-Level Filtering
+
+**Every query includes `organization_id` in WHERE clause:**
+
+```typescript
+// Example: Fetch orders for current org
+const orders = await db
+  .select()
+  .from(ordersTable)
+  .where(eq(ordersTable.organizationId, req.orgId)); // ← Tenant filter
+```
+
+**Why Application-Level?**
+
+- Simpler than PostgreSQL Row-Level Security (RLS)
+- Works with Drizzle ORM's type-safe query builder
+- Easier to debug and audit
+
+**Future:** Add PostgreSQL RLS policies as defense-in-depth.
+
+---
+
+### Example: Fetch Orders (Controller)
+
+```typescript
+import { db } from "../config/db";
+import { ordersTable, orderItemsTable } from "../schema";
+import { eq, and, isNull } from "drizzle-orm";
+
+export const getOrders = async (req: Request, res: Response) => {
+  const { orgId } = req; // Set by authHandler middleware
+
+  const orders = await db
+    .select()
+    .from(ordersTable)
+    .where(
+      and(
+        eq(ordersTable.organizationId, orgId!), // ← Tenant filter
+        isNull(ordersTable.deletedAt) // Exclude soft-deleted orders
+      )
+    )
+    .orderBy(ordersTable.createdAt);
+
+  res.json({ orders });
+};
+```
+
+**Code:** `backend/src/controllers/orderController.ts` (simplified example)
+
+**Key Points:**
+
+1. `req.orgId` is set by `authHandler` middleware (from JWT or API key)
+2. Every query includes `eq(ordersTable.organizationId, req.orgId)`
+3. Drizzle ORM ensures type-safe queries (compile-time checks)
+
+---
+
+### Example: Create Order (Controller)
+
+```typescript
+export const extractOrder = async (req: Request, res: Response) => {
+  const { orgId } = req; // Set by authHandler middleware
+  const { message } = req.body;
+
+  // Extract order via Anthropic API
+  const order = await anthropicService.extractOrderFromMessage(message);
+
+  // Save order to database
+  const savedOrder = await db.transaction(async (tx) => {
+    // Create or find customer
+    let customer;
+    if (order.customerPhone) {
+      [customer] = await tx
+        .select()
+        .from(customersTable)
+        .where(
+          and(
+            eq(customersTable.organizationId, orgId!), // ← Tenant filter
+            eq(customersTable.phone, order.customerPhone)
+          )
+        )
+        .limit(1);
+
+      if (!customer) {
+        [customer] = await tx
+          .insert(customersTable)
+          .values({
+            id: generateId("cust"),
+            organizationId: orgId!, // ← Tenant isolation
+            name: order.customerName,
+            phone: order.customerPhone,
+          })
+          .returning();
+      }
+    }
+
+    // Insert order
+    const [newOrder] = await tx
+      .insert(ordersTable)
+      .values({
+        id: generateId("ord"),
+        organizationId: orgId!, // ← Tenant isolation
+        customerId: customer.id,
+        // ...
+      })
+      .returning();
+
+    return newOrder;
+  });
+
+  res.json({ order: savedOrder });
+};
+```
+
+**Code:** `backend/src/controllers/orderController.ts` (simplified example)
+
+**Key Points:**
+
+1. `organizationId` is set from `req.orgId` for all inserts
+2. Customer lookup includes `eq(customersTable.organizationId, orgId)`
+3. Transaction ensures atomicity (order + customer created together)
+
+---
+
+## Role-Based Access Control (RBAC)
+
+### Roles Table
+
+```typescript
+export const rolesTable = pgTable("roles", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").references(() => organizationsTable.id).notNull(),
+  name: text("name").notNull(),
+  permissions: jsonb("permissions").$type<string[]>().notNull().default([]),
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+});
+```
+
+**Code:** `backend/src/schema.ts:206-212`
+
+### Permission Strings (Example)
+
+```json
+[
+  "orders:read",
+  "orders:write",
+  "orders:delete",
+  "invoices:generate",
+  "api_keys:manage",
+  "users:invite"
+]
+```
+
+### Users Table (Role Assignment)
+
+```typescript
+export const usersTable = pgTable("users", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull(),
+  name: text("name"),
+  organizationId: text("organization_id").references(() => organizationsTable.id),
+  role: text("role").default("member"), // ← Role name (e.g., "admin", "viewer")
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+});
+```
+
+**Code:** `backend/src/schema.ts:214-221`
+
+### Permission Check Middleware (Future)
+
+```typescript
+export const requirePermission = (permission: string) => {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const { user, orgId } = req;
+
+    if (!user || !orgId) {
+      return next(new AppError("Authentication required", 401));
+    }
+
+    // Fetch role permissions
+    const [role] = await db
+      .select()
+      .from(rolesTable)
+      .where(
+        and(
+          eq(rolesTable.organizationId, orgId),
+          eq(rolesTable.name, user.role)
+        )
+      )
+      .limit(1);
+
+    if (!role || !role.permissions.includes(permission)) {
+      return next(new AppError("Insufficient permissions", 403));
+    }
+
+    next();
+  };
+};
+```
+
+**Usage:**
+
+```typescript
+router.delete(
+  "/orders/:id",
+  authHandler,
+  requireOrg,
+  requirePermission("orders:delete"),
+  orderController.deleteOrder
+);
+```
+
+**Not Yet Implemented:** RBAC is a future enhancement.
+
+---
+
+## Data Isolation Guarantees
+
+### What is Isolated?
+
+| Table | Isolated By |
+|-------|-------------|
+| `orders` | `organization_id` |
+| `order_items` | `organization_id` |
+| `customers` | `organization_id` |
+| `products` | `organization_id` |
+| `business_profiles` | `organization_id` (1:1 with org) |
+| `users` | `organization_id` (NULL = not assigned) |
+| `api_keys` | `organization_id` |
+| `roles` | `organization_id` |
+
+### What is NOT Isolated?
+
+| Table | Reason |
+|-------|--------|
+| `organizations` | Root tenant entity (no parent org) |
+
+---
+
+### Foreign Key Relationships
+
+**All data tables reference `organizations.id`:**
+
+```typescript
+organizationId: text("organization_id").references(() => organizationsTable.id).notNull()
+```
+
+**Prevents Orphaned Records:**
+
+- Deleting an organization requires explicit cleanup (no cascading deletes)
+- Prevents accidental data loss
+
+---
+
+## Queue Jobs and Multi-Tenancy
+
+### Job Data Includes `orgId`
+
+```typescript
+export interface ExtractionJobData {
+  type: "single_message" | "chat_log";
+  orgId: string; // ← Tenant identifier
+  message?: string;
+  messages?: ChatMessage[];
+}
+```
+
+**Code:** `backend/src/services/queueService.ts:50-57`
+
+**Worker Enforcement:**
+
+```typescript
+const { orgId } = job.data;
+if (!orgId) throw new Error("Invalid job data: missing orgId");
+
+const savedOrder = await storage.addChatOrder(orgId, order); // ← Tenant filter
+```
+
+**Code:** `backend/src/services/queueService.ts:87-97`
+
+**How `orgId` is Set:**
+
+1. API authenticates request (JWT or API key)
+2. API sets `req.orgId` from JWT/API key
+3. API enqueues job with `orgId: req.orgId`
+4. Worker reads `orgId` from job data
+5. Worker enforces tenant isolation in database queries
+
+---
+
+## Cross-Tenant Attack Scenarios
+
+### Scenario 1: Direct Database Query (Prevented)
+
+**Attack:**
+
+```typescript
+// Attacker tries to access another org's orders
+const orders = await db
+  .select()
+  .from(ordersTable)
+  .where(eq(ordersTable.id, "ord_from_another_org"));
+```
+
+**Prevented By:**
+
+Query must include `eq(ordersTable.organizationId, req.orgId)` to pass code review.
+
+**Defense-in-Depth (Future):** PostgreSQL RLS policies enforce `organization_id` at database level.
+
+---
+
+### Scenario 2: Job Queue Poisoning (Prevented)
+
+**Attack:**
+
+```typescript
+// Attacker enqueues job with another org's orgId
+await addExtractionJob({
+  type: "chat_log",
+  orgId: "org_victim", // ← Attacker controls this
+  messages: [...],
+});
+```
+
+**Prevented By:**
+
+1. API sets `orgId: req.orgId` (from authenticated JWT/API key)
+2. Attacker cannot forge JWT (signed by Neon Auth)
+3. Attacker cannot forge API key (SHA-256 hash verified)
+
+**Code:** `backend/src/services/queueService.ts:275-284`
+
+---
+
+### Scenario 3: API Key Reuse (Prevented)
+
+**Attack:**
+
+```typescript
+// Attacker steals API key from Org A, uses it to access Org B's data
+fetch("/orders?orgId=org_b", {
+  headers: { "X-API-Key": "sk-stolen-from-org-a" },
+});
+```
+
+**Prevented By:**
+
+1. API key is hashed and stored with `organizationId = org_a`
+2. Auth middleware sets `req.orgId = org_a` (from API key lookup)
+3. Query parameter `orgId=org_b` is ignored (only `req.orgId` is used)
+
+**Code:** `backend/src/middlewares/authHandler.ts:55`
+
+---
+
+## Logging and Audit Trails
+
+### Structured Logging
+
+All logs include `orgId` for tenant-scoped debugging:
+
+```json
+{
+  "level": "info",
+  "orgId": "org_abc",
+  "userId": "user_xyz",
+  "action": "order_created",
+  "orderId": "ord_123",
+  "timestamp": "2025-03-04T12:34:56.789Z"
+}
+```
+
+**Query Logs by Org:**
+
+```bash
+jq 'select(.orgId == "org_abc")' logs.json
+```
+
+---
+
+### Audit Log Table (Future)
+
+```typescript
+export const auditLogsTable = pgTable("audit_logs", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").references(() => organizationsTable.id).notNull(),
+  userId: text("user_id").references(() => usersTable.id),
+  action: text("action").notNull(), // "order_created", "order_deleted"
+  resourceType: text("resource_type").notNull(), // "order", "customer"
+  resourceId: text("resource_id").notNull(),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+});
+```
+
+**Use Case:**
+
+- Compliance (GDPR, SOC 2)
+- Debugging ("Who deleted this order?")
+- Security ("Unusual API key usage")
+
+---
+
+## Rate Limiting (Per-Tenant)
+
+### Current Implementation
+
+Rate limits are **per-organization** (via `req.orgId`):
+
+```typescript
+import rateLimit from "express-rate-limit";
+import RedisStore from "rate-limit-redis";
+import { redis } from "../config/redis";
+
+export const extractLimiter = rateLimit({
+  store: new RedisStore({
+    client: redis,
+    prefix: "rate-limit:extract:",
+  }),
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // 10 requests per org per minute
+  keyGenerator: (req) => req.orgId!, // ← Key by orgId
+  message: "Too many extraction requests, please try again later.",
+});
+```
+
+**Code:** `backend/src/middlewares/rateLimiter.ts` (simplified example)
+
+**Why Per-Org?**
+
+- Prevents one org from exhausting API quota
+- Fair usage across tenants
+- Tier-based limits (free vs. pro)
+
+---
+
+### Tier-Based Limits (Future)
+
+```typescript
+export const extractLimiter = rateLimit({
+  max: async (req) => {
+    const org = await db
+      .select()
+      .from(organizationsTable)
+      .where(eq(organizationsTable.id, req.orgId!))
+      .limit(1);
+
+    switch (org[0].tier) {
+      case "free": return 10;
+      case "pro": return 100;
+      case "enterprise": return 1000;
+      default: return 10;
+    }
+  },
+  // ...
+});
+```
+
+---
+
+## Migration Strategy
+
+### Adding a New Tenant-Scoped Table
+
+1. **Define schema with `organizationId` foreign key:**
+
+```typescript
+export const newTable = pgTable("new_table", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").references(() => organizationsTable.id).notNull(),
+  // ...
+});
+```
+
+2. **Add index on `organization_id`:**
+
+```typescript
+}, (table) => {
+  return {
+    orgIdx: index("new_table_org_idx").on(table.organizationId),
+  };
+});
+```
+
+3. **Generate migration:**
+
+```bash
+npm run db:generate
+```
+
+4. **Apply migration:**
+
+```bash
+npm run db:migrate
+```
+
+5. **Update controllers to filter by `req.orgId`:**
+
+```typescript
+const records = await db
+  .select()
+  .from(newTable)
+  .where(eq(newTable.organizationId, req.orgId));
+```
+
+---
+
+## Security Best Practices
+
+### 1. Never Trust Client Input
+
+**Bad:**
+
+```typescript
+const orgId = req.body.orgId; // ← Attacker-controlled
+```
+
+**Good:**
+
+```typescript
+const orgId = req.orgId; // ← Set by authHandler middleware
+```
+
+---
+
+### 2. Always Filter by `organizationId`
+
+**Bad:**
+
+```typescript
+const order = await db
+  .select()
+  .from(ordersTable)
+  .where(eq(ordersTable.id, orderId)) // ← Cross-tenant access possible
+  .limit(1);
+```
+
+**Good:**
+
+```typescript
+const order = await db
+  .select()
+  .from(ordersTable)
+  .where(
+    and(
+      eq(ordersTable.id, orderId),
+      eq(ordersTable.organizationId, req.orgId) // ← Tenant filter
+    )
+  )
+  .limit(1);
+```
+
+---
+
+### 3. Use Constant-Time Comparison for Secrets
+
+**Bad:**
+
+```typescript
+if (incomingHash === storedHash) { // ← Timing attack possible
+  // ...
+}
+```
+
+**Good:**
+
+```typescript
+if (crypto.timingSafeEqual(Buffer.from(incomingHash), Buffer.from(storedHash))) {
+  // ...
+}
+```
+
+**Code:** `backend/src/middlewares/authHandler.ts:48-52`
+
+---
+
+### 4. Index `organization_id` on All Tables
+
+**Why:** Ensures fast tenant-scoped queries.
+
+**Example:**
+
+```typescript
+}, (table) => {
+  return {
+    orgIdx: index("table_org_idx").on(table.organizationId),
+  };
+});
+```
+
+**Code:** `backend/src/schema.ts:136, 164, 183, 200`
+
+---
+
+### 5. Soft Delete with `deletedAt`
+
+**Why:** Prevents permanent data loss, enables audit trails.
+
+**Example:**
+
+```typescript
+export const ordersTable = pgTable("orders", {
+  // ...
+  deletedAt: timestamp("deleted_at", { mode: 'string' }),
+});
+```
+
+**Code:** `backend/src/schema.ts:160`
+
+**Query:**
+
+```typescript
+const activeOrders = await db
+  .select()
+  .from(ordersTable)
+  .where(
+    and(
+      eq(ordersTable.organizationId, req.orgId),
+      isNull(ordersTable.deletedAt) // ← Exclude soft-deleted
+    )
+  );
+```
+
+---
+
+## Compliance & Privacy
+
+### GDPR Compliance
+
+**Right to Erasure ("Right to be Forgotten"):**
+
+1. User requests account deletion
+2. Admin soft-deletes user: `UPDATE users SET deleted_at = NOW()`
+3. Cron job hard-deletes after 30 days: `DELETE FROM users WHERE deleted_at < NOW() - INTERVAL '30 days'`
+
+**Data Export:**
+
+```typescript
+router.get("/export", authHandler, requireOrg, async (req, res) => {
+  const { orgId } = req;
+
+  const [orders, customers, products] = await Promise.all([
+    db.select().from(ordersTable).where(eq(ordersTable.organizationId, orgId)),
+    db.select().from(customersTable).where(eq(customersTable.organizationId, orgId)),
+    db.select().from(productsTable).where(eq(productsTable.organizationId, orgId)),
+  ]);
+
+  res.json({ orders, customers, products });
+});
+```
+
+---
+
+### Data Residency
+
+**Current:** All data stored in PostgreSQL (region: us-east-1)
+
+**Future:** Per-org data residency (EU, US, APAC)
+
+```typescript
+export const organizationsTable = pgTable("organizations", {
+  // ...
+  dataRegion: text("data_region").default("us-east-1"),
+});
+```
+
+**Implementation:** Route queries to region-specific PostgreSQL replicas.
+
+---
+
+## Troubleshooting
+
+### User Cannot Access Any Data
+
+**Cause:** `user.organizationId = NULL`
+
+**Fix:** Admin assigns user to org via dashboard.
+
+---
+
+### Cross-Tenant Data Leak
+
+**Cause:** Query missing `eq(table.organizationId, req.orgId)` filter.
+
+**Fix:** Add tenant filter to all queries. Enable PostgreSQL RLS for defense-in-depth.
+
+---
+
+### API Key Rejected (401)
+
+**Cause:** Key revoked (`is_active = false`) or invalid hash.
+
+**Fix:**
+
+1. Check key status: `SELECT * FROM api_keys WHERE key_hash = <hash>`
+2. Regenerate key if revoked
+
+---
+
+## Code References
+
+| Component | File | Lines |
+|-----------|------|-------|
+| Organizations schema | `backend/src/schema.ts` | 104-110 |
+| API keys schema | `backend/src/schema.ts` | 223-236 |
+| Users schema | `backend/src/schema.ts` | 214-221 |
+| Roles schema | `backend/src/schema.ts` | 206-212 |
+| JWT auth | `backend/src/middlewares/authHandler.ts` | 60-94 |
+| API key auth | `backend/src/middlewares/authHandler.ts` | 27-56 |
+| Require org middleware | `backend/src/middlewares/authHandler.ts` | 106-111 |
+| Job data with orgId | `backend/src/services/queueService.ts` | 50-57 |
+| Worker org enforcement | `backend/src/services/queueService.ts` | 87-97 |

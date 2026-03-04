@@ -1,0 +1,243 @@
+---
+title: Docker Compose Setup
+description: Production Docker Compose configuration for Chat2Cash
+---
+
+## Overview
+
+Chat2Cash uses Docker Compose to orchestrate a multi-service architecture with PostgreSQL, Redis, API servers, background workers, and a frontend. The setup is designed for production readiness with health checks, volume persistence, and service dependencies.
+
+## Service Architecture
+
+### 1. PostgreSQL Database
+
+```yaml
+db:
+  image: postgres:15-alpine
+  restart: always
+  environment:
+    POSTGRES_USER: user
+    POSTGRES_PASSWORD: password
+    POSTGRES_DB: chat2cash
+  ports:
+    - "5432:5432"
+  volumes:
+    - postgres_data:/var/lib/postgresql/data
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U user -d chat2cash"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+```
+
+**Key Features:**
+- Uses PostgreSQL 15 Alpine for minimal image size
+- Persistent volume mounted at `/var/lib/postgresql/data`
+- Health check using `pg_isready` ensures database is accepting connections
+- Automatic restart on failure
+
+**Production Considerations:**
+- Replace default credentials with strong passwords
+- Consider using secrets management instead of environment variables
+- Adjust health check intervals based on load patterns
+
+### 2. Redis Queue Backend
+
+```yaml
+redis:
+  image: redis:7-alpine
+  restart: always
+  command: redis-server --appendonly yes --appendfsync everysec
+  ports:
+    - "6379:6379"
+  volumes:
+    - redis_data:/data
+  healthcheck:
+    test: ["CMD", "redis-cli", "ping"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+```
+
+**Key Features:**
+- **AOF Persistence**: Append-Only File (AOF) mode with `everysec` fsync prevents job loss on Redis crashes
+- Persistent volume at `/data` stores AOF files
+- Health check via `redis-cli ping`
+
+**Production Considerations:**
+- AOF mode trades slight performance for durability—critical for job queues
+- Monitor Redis memory usage; set `maxmemory` policy if needed
+- Consider Redis Sentinel or Cluster for high availability
+
+### 3. API Server
+
+```yaml
+api:
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  command: npm run dev
+  restart: always
+  ports:
+    - "3000:3000"
+  environment:
+    NODE_ENV: development
+    PORT: 3000
+    DATABASE_URL: postgres://user:password@db:5432/chat2cash
+    REDIS_URL: redis://redis:6379
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    DEFAULT_BUSINESS_NAME: ${DEFAULT_BUSINESS_NAME:-Chat2Cash Store}
+    DEFAULT_GST_NUMBER: ${DEFAULT_GST_NUMBER:-22AAAAA0000A1Z5}
+    FRONTEND_URL: http://localhost:5173
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+```
+
+**Key Features:**
+- Handles HTTP requests only—no AI processing (offloaded to workers)
+- Waits for database and Redis to pass health checks before starting
+- Built from multi-stage Dockerfile for optimized image size (~100MB)
+
+**Production Considerations:**
+- Change `NODE_ENV` to `production`
+- Use `npm start` instead of `npm run dev` for production
+- Scale horizontally by running multiple API replicas behind a load balancer
+- Implement container health checks for orchestration platforms
+
+### 4. Background Worker
+
+```yaml
+worker:
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  command: npm run dev:worker
+  restart: always
+  environment:
+    NODE_ENV: development
+    DATABASE_URL: postgres://user:password@db:5432/chat2cash
+    REDIS_URL: redis://redis:6379
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    DEFAULT_BUSINESS_NAME: ${DEFAULT_BUSINESS_NAME:-Chat2Cash Store}
+    DEFAULT_GST_NUMBER: ${DEFAULT_GST_NUMBER:-22AAAAA0000A1Z5}
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  deploy:
+    replicas: 2
+```
+
+**Key Features:**
+- **Horizontal Scaling**: 2 replicas by default, each polling the same BullMQ queue
+- Dedicated to AI extraction jobs—isolated from API request handling
+- No exposed ports (internal service only)
+
+**Production Considerations:**
+- Scale replicas based on queue depth and AI processing latency
+- Monitor queue metrics (waiting jobs, completed jobs, failed jobs)
+- Workers share the same Redis queue—BullMQ handles job distribution
+
+### 5. Frontend
+
+```yaml
+frontend:
+  build:
+    context: .
+    dockerfile: frontend/Dockerfile
+  ports:
+    - "5173:5173"
+  environment:
+    NODE_ENV: development
+  depends_on:
+    - api
+```
+
+**Key Features:**
+- Vite dev server with hot module replacement
+- Proxies `/api` requests to the API service
+
+**Production Considerations:**
+- Build static assets and serve via nginx or CDN
+- Remove dev dependencies from production image
+- Enable caching headers for assets
+
+## Volume Persistence
+
+```yaml
+volumes:
+  postgres_data:
+  redis_data:
+```
+
+**Persistent Volumes:**
+- `postgres_data`: Stores PostgreSQL database files
+- `redis_data`: Stores Redis AOF files for job queue persistence
+
+**Backup Strategy:**
+```bash
+# Backup PostgreSQL
+docker compose exec db pg_dump -U user chat2cash > backup.sql
+
+# Restore PostgreSQL
+docker compose exec -T db psql -U user chat2cash < backup.sql
+
+# Backup Redis (manual RDB save)
+docker compose exec redis redis-cli BGSAVE
+```
+
+## Health Checks
+
+All critical services implement health checks:
+
+| Service | Health Check Command | Interval | Timeout | Retries |
+|---------|---------------------|----------|---------|--------|
+| PostgreSQL | `pg_isready -U user -d chat2cash` | 10s | 5s | 5 |
+| Redis | `redis-cli ping` | 10s | 5s | 5 |
+| API | `wget -qO- http://localhost:3000/api/health` | 30s | 5s | 3 |
+
+**Production Benefits:**
+- Dependent services wait for upstream services to become healthy
+- Orchestration platforms (Kubernetes, Docker Swarm) can auto-restart unhealthy containers
+- Load balancers can route traffic away from failing API instances
+
+## Starting the Stack
+
+```bash
+# Start all services
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Check service status
+docker compose ps
+
+# Scale workers dynamically
+docker compose up -d --scale worker=5
+
+# Stop all services
+docker compose down
+
+# Stop and remove volumes (data loss!)
+docker compose down -v
+```
+
+## Production Checklist
+
+- [ ] Change `NODE_ENV` to `production` for all Node.js services
+- [ ] Replace default PostgreSQL credentials
+- [ ] Set strong `ANTHROPIC_API_KEY` via environment variable
+- [ ] Configure `FRONTEND_URL` for CORS
+- [ ] Enable TLS/SSL for PostgreSQL connections
+- [ ] Set up volume backups (PostgreSQL and Redis)
+- [ ] Configure log aggregation (e.g., Loki, ELK)
+- [ ] Set resource limits (CPU, memory) for each service
+- [ ] Implement monitoring and alerting (Prometheus, Grafana)
+- [ ] Review and adjust health check intervals
+- [ ] Use Docker secrets for sensitive environment variables
+- [ ] Configure container restart policies based on failure patterns

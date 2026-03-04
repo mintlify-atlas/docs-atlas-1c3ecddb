@@ -1,0 +1,217 @@
+---
+title: "Extract Order from Message"
+api: "POST /api/extract"
+description: "Synchronously extract order details from a single message using AI"
+---
+
+## Overview
+
+Extract structured order information from a single text message in real-time. This endpoint processes the message synchronously and returns the extracted order immediately.
+
+## Authentication
+
+Requires a valid API key in the `Authorization` header:
+
+```
+Authorization: Bearer YOUR_API_KEY
+```
+
+## Rate Limiting
+
+This endpoint uses the extraction rate limiter. Limits vary by organization tier.
+
+## Idempotency
+
+Supports idempotency via the `Idempotency-Key` header to prevent duplicate order creation:
+
+```
+Idempotency-Key: unique-key-123
+```
+
+## Request Body
+
+<ParamField body="message" type="string" required>
+  The text message containing order details to extract
+  
+  **Validation:**
+  - Must be at least 1 character long
+  - Required field
+</ParamField>
+
+## Response
+
+Returns the extracted order with a `201 Created` status code.
+
+<ResponseField name="id" type="string">
+  Unique identifier for the extracted order
+</ResponseField>
+
+<ResponseField name="customerName" type="string">
+  Extracted customer name (may be null)
+</ResponseField>
+
+<ResponseField name="customerPhone" type="string">
+  Extracted customer phone number (may be null)
+</ResponseField>
+
+<ResponseField name="items" type="array">
+  Array of order items extracted from the message
+  
+  <Expandable title="Item Object">
+    <ResponseField name="name" type="string">
+      Product or item name
+    </ResponseField>
+    
+    <ResponseField name="quantity" type="number">
+      Quantity ordered
+    </ResponseField>
+    
+    <ResponseField name="unit" type="string">
+      Unit of measurement (e.g., "kg", "pcs")
+    </ResponseField>
+    
+    <ResponseField name="pricePerUnit" type="number">
+      Price per unit (may be null)
+    </ResponseField>
+    
+    <ResponseField name="totalPrice" type="number">
+      Total price for this item (may be null)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="totalAmount" type="number">
+  Total order amount (may be null if not specified)
+</ResponseField>
+
+<ResponseField name="currency" type="string">
+  Currency code (default: "INR")
+</ResponseField>
+
+<ResponseField name="notes" type="string">
+  Additional notes or instructions extracted
+</ResponseField>
+
+<ResponseField name="rawMessage" type="string">
+  Original message text
+</ResponseField>
+
+<ResponseField name="confidence" type="number">
+  AI confidence score between 0 and 1
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Order status. One of: `pending`, `confirmed`, `fulfilled`, `cancelled`
+  
+  Default: `pending`
+</ResponseField>
+
+<ResponseField name="createdAt" type="string">
+  ISO 8601 timestamp of order creation
+</ResponseField>
+
+## Example Request
+
+```bash
+curl -X POST https://api.chat2cash.com/api/extract \
+  -H "Authorization: Bearer c2c_your_api_key_here" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-2024-03-04-001" \
+  -d '{
+    "message": "Hi, I need 5 kg tomatoes and 2 kg onions for tomorrow. Deliver to Rajesh at 98765-43210"
+  }'
+```
+
+## Example Response
+
+```json
+{
+  "id": "ord_9k2j3h4g5f6d7s8a",
+  "customerName": "Rajesh",
+  "customerPhone": "98765-43210",
+  "items": [
+    {
+      "name": "tomatoes",
+      "quantity": 5,
+      "unit": "kg",
+      "pricePerUnit": null,
+      "totalPrice": null
+    },
+    {
+      "name": "onions",
+      "quantity": 2,
+      "unit": "kg",
+      "pricePerUnit": null,
+      "totalPrice": null
+    }
+  ],
+  "totalAmount": null,
+  "currency": "INR",
+  "notes": "Deliver tomorrow",
+  "rawMessage": "Hi, I need 5 kg tomatoes and 2 kg onions for tomorrow. Deliver to Rajesh at 98765-43210",
+  "confidence": 0.92,
+  "status": "pending",
+  "createdAt": "2026-03-04T10:30:00.000Z"
+}
+```
+
+## Error Responses
+
+### 400 Bad Request
+
+Returned when the request body is invalid or missing required fields.
+
+```json
+{
+  "error": "Validation error",
+  "details": "Message is required"
+}
+```
+
+### 401 Unauthorized
+
+Returned when the API key is missing or invalid.
+
+```json
+{
+  "error": "Unauthorized",
+  "message": "Invalid or missing API key"
+}
+```
+
+### 429 Too Many Requests
+
+Returned when rate limits are exceeded.
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "message": "Too many extraction requests. Please try again later."
+}
+```
+
+### 500 Internal Server Error
+
+Returned when an unexpected error occurs during processing.
+
+```json
+{
+  "error": "Internal server error",
+  "message": "Failed to process order extraction"
+}
+```
+
+## Use Cases
+
+- **SMS/WhatsApp Integration**: Extract orders from incoming text messages
+- **Quick Order Entry**: Convert free-form text into structured orders
+- **Voice-to-Text Orders**: Process transcribed voice orders
+- **Mobile Apps**: Simple text-based order creation
+
+## Best Practices
+
+- Use the `Idempotency-Key` header to prevent duplicate orders from retries
+- Include as much detail as possible in the message for better extraction accuracy
+- Check the `confidence` score in the response to determine if manual review is needed
+- For chat conversations with multiple messages, use [/api/extract-order](/api/endpoints/extract-order) instead
+- For high-volume or non-urgent extractions, consider using [/api/async/extract](/api/endpoints/async-extract)

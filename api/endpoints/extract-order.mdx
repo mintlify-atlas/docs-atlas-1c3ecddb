@@ -1,0 +1,279 @@
+---
+title: "Extract Order from Chat History"
+api: "POST /api/extract-order"
+description: "Synchronously extract order details from a complete chat conversation"
+---
+
+## Overview
+
+Extract structured order information from a full chat conversation history. This endpoint analyzes multiple messages between customer and business to extract comprehensive order details including delivery information and special instructions.
+
+## Authentication
+
+Requires a valid API key in the `Authorization` header:
+
+```
+Authorization: Bearer YOUR_API_KEY
+```
+
+## Rate Limiting
+
+This endpoint uses the extraction rate limiter. Limits vary by organization tier.
+
+## Idempotency
+
+Supports idempotency via the `Idempotency-Key` header to prevent duplicate order creation:
+
+```
+Idempotency-Key: unique-chat-key-456
+```
+
+## Request Body
+
+<ParamField body="messages" type="array" required>
+  Array of chat messages in chronological order. Must contain at least one message.
+  
+  <Expandable title="Message Object">
+    <ParamField body="sender" type="string" required>
+      Identifier for the message sender (e.g., "customer", "business", phone number, or name)
+    </ParamField>
+    
+    <ParamField body="text" type="string" required>
+      The message text content
+    </ParamField>
+  </Expandable>
+  
+  **Validation:**
+  - Array must contain at least 1 message
+  - Each message must have both `sender` and `text` fields
+</ParamField>
+
+## Response
+
+Returns the extracted order with a `201 Created` status code.
+
+<ResponseField name="id" type="string">
+  Unique identifier for the extracted order
+</ResponseField>
+
+<ResponseField name="customer_name" type="string">
+  Extracted customer name (may be null)
+</ResponseField>
+
+<ResponseField name="items" type="array">
+  Array of order items extracted from the chat
+  
+  <Expandable title="Item Object">
+    <ResponseField name="product_name" type="string">
+      Product or item name (cannot be empty)
+    </ResponseField>
+    
+    <ResponseField name="quantity" type="number">
+      Quantity ordered (must be greater than 0)
+    </ResponseField>
+    
+    <ResponseField name="price" type="number">
+      Price per unit (may be null)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="delivery_address" type="string">
+  Extracted delivery address (may be null)
+</ResponseField>
+
+<ResponseField name="delivery_date" type="string">
+  Extracted or inferred delivery date (may be null)
+</ResponseField>
+
+<ResponseField name="special_instructions" type="string">
+  Special instructions or notes from the conversation (may be null)
+</ResponseField>
+
+<ResponseField name="total" type="number">
+  Total order amount (may be null if not discussed)
+</ResponseField>
+
+<ResponseField name="confidence" type="string">
+  AI confidence level. One of: `high`, `medium`, `low`
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Order status (default: `pending`)
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  ISO 8601 timestamp of order creation
+</ResponseField>
+
+<ResponseField name="raw_messages" type="array">
+  Original chat messages stored with the order
+</ResponseField>
+
+<ResponseField name="invoice" type="object">
+  Generated invoice data (may be null)
+</ResponseField>
+
+## Example Request
+
+```bash
+curl -X POST https://api.chat2cash.com/api/extract-order \
+  -H "Authorization: Bearer c2c_your_api_key_here" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: chat-2024-03-04-001" \
+  -d '{
+    "messages": [
+      {
+        "sender": "customer",
+        "text": "Hi, I need vegetables for my restaurant"
+      },
+      {
+        "sender": "business",
+        "text": "Sure! What would you like to order?"
+      },
+      {
+        "sender": "customer",
+        "text": "10 kg tomatoes, 5 kg onions, and 3 kg potatoes"
+      },
+      {
+        "sender": "business",
+        "text": "Got it. When do you need delivery?"
+      },
+      {
+        "sender": "customer",
+        "text": "Tomorrow morning by 8 AM. Address is Hotel Taj, MG Road, Bangalore"
+      },
+      {
+        "sender": "business",
+        "text": "Perfect. Total will be 850 rupees. Confirmed!"
+      }
+    ]
+  }'
+```
+
+## Example Response
+
+```json
+{
+  "id": "ord_8h7g6f5d4s3a2z1x",
+  "customer_name": null,
+  "items": [
+    {
+      "product_name": "tomatoes",
+      "quantity": 10,
+      "price": null
+    },
+    {
+      "product_name": "onions",
+      "quantity": 5,
+      "price": null
+    },
+    {
+      "product_name": "potatoes",
+      "quantity": 3,
+      "price": null
+    }
+  ],
+  "delivery_address": "Hotel Taj, MG Road, Bangalore",
+  "delivery_date": "2026-03-05T08:00:00.000Z",
+  "special_instructions": "Deliver by 8 AM",
+  "total": 850,
+  "confidence": "high",
+  "status": "pending",
+  "created_at": "2026-03-04T11:30:00.000Z",
+  "raw_messages": [
+    {
+      "sender": "customer",
+      "text": "Hi, I need vegetables for my restaurant"
+    },
+    {
+      "sender": "business",
+      "text": "Sure! What would you like to order?"
+    },
+    {
+      "sender": "customer",
+      "text": "10 kg tomatoes, 5 kg onions, and 3 kg potatoes"
+    },
+    {
+      "sender": "business",
+      "text": "Got it. When do you need delivery?"
+    },
+    {
+      "sender": "customer",
+      "text": "Tomorrow morning by 8 AM. Address is Hotel Taj, MG Road, Bangalore"
+    },
+    {
+      "sender": "business",
+      "text": "Perfect. Total will be 850 rupees. Confirmed!"
+    }
+  ],
+  "invoice": null
+}
+```
+
+## Error Responses
+
+### 400 Bad Request
+
+Returned when the request body is invalid or missing required fields.
+
+```json
+{
+  "error": "Validation error",
+  "details": "At least one message is required"
+}
+```
+
+### 401 Unauthorized
+
+Returned when the API key is missing or invalid.
+
+```json
+{
+  "error": "Unauthorized",
+  "message": "Invalid or missing API key"
+}
+```
+
+### 429 Too Many Requests
+
+Returned when rate limits are exceeded.
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "message": "Too many extraction requests. Please try again later."
+}
+```
+
+### 500 Internal Server Error
+
+Returned when an unexpected error occurs during processing.
+
+```json
+{
+  "error": "Internal server error",
+  "message": "Failed to process chat order extraction"
+}
+```
+
+## Use Cases
+
+- **WhatsApp Business Integration**: Extract orders from complete WhatsApp conversations
+- **Live Chat Systems**: Process full chat transcripts into structured orders
+- **Customer Service Tools**: Convert support conversations containing orders
+- **Multi-turn Order Collection**: Handle complex orders discussed over multiple messages
+
+## Best Practices
+
+- Include the complete conversation for best context and accuracy
+- Maintain chronological order of messages
+- Use consistent sender identifiers throughout the conversation
+- The AI can infer information from context (e.g., "tomorrow" becomes an actual date)
+- Check the `confidence` field to determine if manual review is needed
+- For single-message orders, use [/api/extract](/api/endpoints/extract) instead
+- For high-volume or non-urgent extractions, consider using [/api/async/extract-order](/api/endpoints/async-extract-order)
+
+## Message Order Matters
+
+The order of messages is critical for proper context understanding. Always submit messages in chronological order from oldest to newest.

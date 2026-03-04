@@ -1,0 +1,143 @@
+---
+title: "Download Invoice"
+description: "Download a generated invoice PDF with secure signed URL"
+---
+
+## Endpoint
+
+```
+GET /api/orders/:id/download
+```
+
+Generates a short-lived signed URL and redirects the client to download the invoice PDF from Azure Blob Storage.
+
+## Authentication
+
+Requires a valid Bearer token in the `Authorization` header.
+
+```bash
+Authorization: Bearer YOUR_API_KEY
+```
+
+## Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique identifier of the order whose invoice you want to download.
+</ParamField>
+
+## Response
+
+This endpoint returns an HTTP 302 redirect to a signed Azure Blob Storage URL that is valid for 5 minutes.
+
+<ResponseField name="Location" type="string">
+  Signed URL to download the invoice PDF (returned as HTTP redirect header).
+</ResponseField>
+
+## Example Request
+
+```bash
+curl -L -X GET https://your-domain.com/api/orders/cm59h2c4y000008l31y4q8bqz/download \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -o invoice.pdf
+```
+
+<Note>
+  The `-L` flag tells curl to follow the redirect. Without it, you'll receive the 302 response instead of the PDF file.
+</Note>
+
+## Response Headers
+
+```
+HTTP/1.1 302 Found
+Location: https://yourstorage.blob.core.windows.net/invoices/invoice_INV-2024-0042.pdf?sv=2023-11-03&st=2024-03-04T10%3A30%3A00Z&se=2024-03-04T10%3A35%3A00Z&sr=b&sp=r&sig=...
+Content-Type: application/pdf
+```
+
+## Direct Download Example (Browser)
+
+You can use this endpoint directly in a browser or as a download link:
+
+```html
+<a href="https://your-domain.com/api/orders/cm59h2c4y000008l31y4q8bqz/download" 
+   download="invoice.pdf">
+  Download Invoice
+</a>
+```
+
+## JavaScript Example
+
+```javascript
+const downloadInvoice = async (orderId) => {
+  const response = await fetch(
+    `https://your-domain.com/api/orders/${orderId}/download`,
+    {
+      headers: {
+        'Authorization': `Bearer ${YOUR_API_KEY}`
+      }
+    }
+  );
+  
+  if (!response.ok) {
+    throw new Error('Failed to download invoice');
+  }
+  
+  const blob = await response.blob();
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `invoice-${orderId}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.URL.revokeObjectURL(url);
+};
+
+downloadInvoice('cm59h2c4y000008l31y4q8bqz');
+```
+
+## Error Responses
+
+<ResponseExample>
+```json Order Not Found
+{
+  "error": "Order not found",
+  "statusCode": 404
+}
+```
+
+```json No Invoice Generated
+{
+  "error": "No invoice generated for this order",
+  "statusCode": 404
+}
+```
+
+```json Unauthorized
+{
+  "error": "Unauthorized",
+  "statusCode": 401
+}
+```
+</ResponseExample>
+
+## Security
+
+<Warning>
+  The signed URL is valid for only **5 minutes** after generation. After expiration, clients must request a new download URL.
+</Warning>
+
+<Info>
+  The endpoint verifies both authentication and organization ownership before generating the signed URL, ensuring secure access control.
+</Info>
+
+## Rate Limiting
+
+This endpoint is subject to rate limiting:
+- **Limit**: 20 requests per minute per API key
+- **Quota**: Enforced via the `generalLimiter` middleware
+
+## Notes
+
+- The PDF file is stored in Azure Blob Storage with the naming pattern: `invoice_{invoice_number}.pdf`
+- Signed URLs include SAS (Shared Access Signature) tokens for secure, time-limited access
+- No PII redaction is applied to invoice downloads as they're intended for business records

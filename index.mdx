@@ -1,97 +1,319 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: Chat2Cash Documentation
+mode: custom
 ---
 
-## Setting up
+<div className="relative overflow-hidden bg-gradient-to-br from-[#075E54] via-[#128C7E] to-[#25D366] dark:from-[#0a1f1c] dark:via-[#0d2f29] dark:to-[#0f3e36] py-20">
+  <div className="max-w-7xl mx-auto px-6 lg:px-8">
+    <div className="grid lg:grid-cols-12 gap-12 items-center">
+      <div className="lg:col-span-7">
+        <h1 className="text-5xl sm:text-6xl lg:text-7xl font-bold text-white mb-6">
+          Turn WhatsApp chats into revenue
+        </h1>
+        <p className="text-xl sm:text-2xl text-white/90 max-w-2xl mb-8">
+          AI-powered revenue recovery system for India's 60 million WhatsApp-first SMB businesses. Extract orders from Hinglish conversations, generate GST invoices, and never lose revenue to buried chats.
+        </p>
+        <div className="flex flex-wrap gap-4">
+          <a
+            href="/quickstart"
+            className="inline-flex items-center px-6 py-3 rounded-lg bg-white text-[#075E54] font-semibold hover:bg-gray-100 transition-colors"
+          >
+            Get Started
+            <svg className="ml-2 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+            </svg>
+          </a>
+          <a
+            href="/api/overview"
+            className="inline-flex items-center px-6 py-3 rounded-lg border-2 border-white/30 bg-white/10 text-white font-semibold hover:bg-white/20 transition-colors"
+          >
+            API Reference
+          </a>
+        </div>
+      </div>
+      <div className="lg:col-span-5 hidden lg:block">
+        <div className="relative">
+          <div className="absolute inset-0 bg-gradient-to-r from-[#25D366]/20 to-transparent rounded-2xl blur-3xl"></div>
+          <div className="relative bg-white/10 backdrop-blur-sm border border-white/20 rounded-2xl p-6 text-white">
+            <div className="text-sm font-mono mb-4 text-white/80">AI-powered extraction</div>
+            <div className="space-y-3">
+              <div className="bg-white/5 border border-white/10 rounded-lg p-3">
+                <div className="text-xs text-white/60 mb-1">Input (Hinglish)</div>
+                <div className="text-sm">"Bhaiya 2 kilo aaloo aur 1 kilo pyaaz book kardo"</div>
+              </div>
+              <div className="flex justify-center">
+                <svg className="w-6 h-6 text-[#25D366]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                </svg>
+              </div>
+              <div className="bg-white/5 border border-white/10 rounded-lg p-3">
+                <div className="text-xs text-white/60 mb-1">Output (Structured)</div>
+                <div className="text-xs font-mono text-[#25D366]">
+                  {'{'} "items": [<br/>
+                  &nbsp;&nbsp;{'{'}"name": "Potato", "qty": 2, "unit": "kg"{'}'},<br/>
+                  &nbsp;&nbsp;{'{'}"name": "Onion", "qty": 1, "unit": "kg"{'}'}<br/>
+                  ]{'}'}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
-Get your documentation site up and running in minutes.
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <div className="text-center mb-12">
+    <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Quick Start</h2>
+    <p className="text-lg text-gray-600 dark:text-gray-400 max-w-2xl mx-auto">
+      Get Chat2Cash running in minutes with Docker or deploy manually for custom setups
+    </p>
+  </div>
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+  <Steps>
+    <Step title="Install with Docker Compose">
+      Clone the repository and start the full distributed stack with PostgreSQL, Redis, API server, and background workers:
 
-## Make it yours
+      ```bash
+      git clone https://github.com/swayam-mishra/Chat2Cash.git
+      cd Chat2Cash
+      ```
 
-Design a docs site that looks great and empowers your users.
+      Create a `.env` file with your credentials:
 
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
+      ```bash
+      ANTHROPIC_API_KEY="sk-ant-api03-..."
+      DEFAULT_BUSINESS_NAME="My Business"
+      DEFAULT_GST_NUMBER="22AAAAA0000A1Z5"
+      ```
+
+      Start the stack:
+
+      ```bash
+      docker-compose up --build
+      ```
+
+      The API will be available at `http://localhost:3000`
+    </Step>
+
+    <Step title="Extract your first order">
+      Send a message to extract order details from a Hinglish conversation:
+
+      ```bash
+      curl -X POST http://localhost:3000/api/extract \
+        -H "Content-Type: application/json" \
+        -d '{
+          "message": "Bhaiya 2 kilo aaloo aur 3 kilo pyaaz chahiye, kal delivery karna"
+        }'
+      ```
+
+      <Accordion title="Example response">
+        ```json
+        {
+          "id": "ord_abc123",
+          "items": [
+            {
+              "name": "Potato",
+              "quantity": 2,
+              "unit": "kg"
+            },
+            {
+              "name": "Onion",
+              "quantity": 3,
+              "unit": "kg"
+            }
+          ],
+          "confidence": 0.95,
+          "status": "pending",
+          "deliveryDate": "2024-03-05",
+          "createdAt": "2024-03-04T10:30:00Z"
+        }
+        ```
+      </Accordion>
+    </Step>
+
+    <Step title="Generate GST invoice">
+      Convert the extracted order into a professional, GST-compliant PDF invoice:
+
+      ```bash
+      curl -X POST http://localhost:3000/api/generate-invoice \
+        -H "Content-Type: application/json" \
+        -d '{
+          "orderId": "ord_abc123"
+        }'
+      ```
+
+      The response includes the invoice with CGST/SGST/IGST breakdowns and sequential numbering.
+    </Step>
+
+    <Step title="Explore advanced features">
+      Check out async processing, multi-tenant setup, and real-time job tracking with SSE streaming. See the [Architecture](/architecture/overview) section for distributed system details.
+    </Step>
+  </Steps>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <div className="text-center mb-12">
+    <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Core Features</h2>
+    <p className="text-lg text-gray-600 dark:text-gray-400 max-w-2xl mx-auto">
+      Built for India's WhatsApp-first businesses with enterprise-grade reliability
+    </p>
+  </div>
+
+  <CardGroup cols={2}>
     <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
-  </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
+      title="AI-powered Hinglish extraction"
+      icon="brain"
+      href="/features/ai-extraction"
+    >
+      Claude 3.5 Sonnet understands mixed Hindi-English conversations, extracts items, quantities, delivery dates, and special instructions from unstructured chats.
+    </Card>
+    <Card
+      title="Distributed architecture"
+      icon="server"
+      href="/architecture/overview"
+    >
+      Horizontally scalable with decoupled API and worker tiers, BullMQ queues with AOF persistence, and PostgreSQL for zero data loss.
+    </Card>
+    <Card
+      title="GST-compliant invoicing"
+      icon="file-invoice"
+      href="/features/invoice-generation"
+    >
+      One-click PDF generation with automatic CGST/SGST/IGST calculations, sequential numbering, and professional formatting.
+    </Card>
+    <Card
+      title="Multi-tenant SaaS"
+      icon="building"
+      href="/architecture/multi-tenant"
+    >
+      Organization-based access control, API keys, role-based permissions, and isolated data per tenant.
+    </Card>
+    <Card
+      title="Real-time job tracking"
+      icon="chart-line"
+      href="/features/async-processing"
+    >
+      Background processing with BullMQ, SSE streaming for live updates, and correlation IDs for distributed tracing.
+    </Card>
+    <Card
+      title="Security & observability"
+      icon="shield"
+      href="/security/authentication"
+    >
+      Rate limiting, PII redaction, input sanitization, Sentry error tracking, and structured logging with Pino.
+    </Card>
+  </CardGroup>
+</div>
 
-## Create beautiful pages
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <div className="text-center mb-12">
+    <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Explore the Documentation</h2>
+    <p className="text-lg text-gray-600 dark:text-gray-400 max-w-2xl mx-auto">
+      Everything you need to integrate, deploy, and scale Chat2Cash
+    </p>
+  </div>
 
-Everything you need to create world-class documentation.
+  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <a href="/introduction" className="group block rounded-2xl border border-gray-200 dark:border-[#27272a] hover:border-[#25D366] dark:hover:border-[#25D366] overflow-hidden no-underline transition-colors">
+      <div className="h-32 bg-gradient-to-br from-[#DCF8C6] to-[#25D366] dark:from-[#0f3e36] dark:to-[#128C7E] flex items-center justify-center">
+        <svg className="w-16 h-16 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+        </svg>
+      </div>
+      <div className="p-6 bg-white dark:bg-[#1a1d27]">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2 group-hover:text-[#25D366] transition-colors">Overview & Concepts</h3>
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+          Learn why Chat2Cash exists, how it works, and the problem it solves for SMB businesses.
+        </p>
+        <div className="flex items-center text-sm font-medium text-gray-500 dark:text-gray-400 group-hover:text-[#25D366] transition-colors">
+          Read more
+          <svg className="ml-1 w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </div>
+      </div>
+    </a>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+    <a href="/api/overview" className="group block rounded-2xl border border-gray-200 dark:border-[#27272a] hover:border-[#25D366] dark:hover:border-[#25D366] overflow-hidden no-underline transition-colors">
+      <div className="h-32 bg-gradient-to-br from-[#128C7E] to-[#075E54] dark:from-[#0d2f29] dark:to-[#0a1f1c] flex items-center justify-center">
+        <svg className="w-16 h-16 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+        </svg>
+      </div>
+      <div className="p-6 bg-white dark:bg-[#1a1d27]">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2 group-hover:text-[#25D366] transition-colors">API Reference</h3>
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+          Complete REST API documentation with authentication, endpoints, request/response schemas, and examples.
+        </p>
+        <div className="flex items-center text-sm font-medium text-gray-500 dark:text-gray-400 group-hover:text-[#25D366] transition-colors">
+          Explore API
+          <svg className="ml-1 w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </div>
+      </div>
+    </a>
 
-## Need inspiration?
+    <a href="/architecture/overview" className="group block rounded-2xl border border-gray-200 dark:border-[#27272a] hover:border-[#25D366] dark:hover:border-[#25D366] overflow-hidden no-underline transition-colors">
+      <div className="h-32 bg-gradient-to-br from-[#25D366] to-[#128C7E] dark:from-[#128C7E] dark:to-[#0f3e36] flex items-center justify-center">
+        <svg className="w-16 h-16 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+        </svg>
+      </div>
+      <div className="p-6 bg-white dark:bg-[#1a1d27]">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2 group-hover:text-[#25D366] transition-colors">Architecture Deep Dive</h3>
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+          Understand the distributed system design, queue architecture, database schema, and multi-tenant model.
+        </p>
+        <div className="flex items-center text-sm font-medium text-gray-500 dark:text-gray-400 group-hover:text-[#25D366] transition-colors">
+          Learn more
+          <svg className="ml-1 w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </div>
+      </div>
+    </a>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    <a href="/deployment/docker-compose" className="group block rounded-2xl border border-gray-200 dark:border-[#27272a] hover:border-[#25D366] dark:hover:border-[#25D366] overflow-hidden no-underline transition-colors">
+      <div className="h-32 bg-gradient-to-br from-[#075E54] to-[#25D366] dark:from-[#0a1f1c] dark:to-[#0d2f29] flex items-center justify-center">
+        <svg className="w-16 h-16 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+        </svg>
+      </div>
+      <div className="p-6 bg-white dark:bg-[#1a1d27]">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2 group-hover:text-[#25D366] transition-colors">Deployment & Scaling</h3>
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+          Production deployment guides, horizontal scaling strategies, and environment configuration.
+        </p>
+        <div className="flex items-center text-sm font-medium text-gray-500 dark:text-gray-400 group-hover:text-[#25D366] transition-colors">
+          Deploy now
+          <svg className="ml-1 w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </div>
+      </div>
+    </a>
+  </div>
+</div>
+
+<div className="mt-20 mb-16 max-w-5xl mx-auto px-6">
+  <div className="bg-gradient-to-br from-[#075E54] to-[#25D366] dark:from-[#0a1f1c] dark:to-[#0f3e36] rounded-2xl p-12 text-center border border-[#25D366]/20">
+    <h2 className="text-3xl font-bold text-white mb-4">
+      Ready to recover lost revenue?
+    </h2>
+    <p className="text-xl text-white/90 mb-8 max-w-2xl mx-auto">
+      Join the 60 million Indian SMBs transforming WhatsApp conversations into structured business operations.
+    </p>
+    <a
+      href="/quickstart"
+      className="inline-flex items-center px-8 py-4 rounded-lg bg-white text-[#075E54] font-semibold hover:bg-gray-100 transition-colors"
+    >
+      Start Building
+      <svg className="ml-2 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+      </svg>
+    </a>
+  </div>
+</div>

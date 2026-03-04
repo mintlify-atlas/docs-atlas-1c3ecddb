@@ -1,0 +1,746 @@
+---
+title: Database Schema
+description: Complete PostgreSQL schema documentation from Drizzle ORM
+---
+
+## Schema Overview
+
+Chat2Cash uses **PostgreSQL 15** with **Drizzle ORM** for type-safe database access. The schema supports multi-tenant isolation via `organizationId` foreign keys on all data tables.
+
+**ORM:** Drizzle ORM  
+**Schema File:** `backend/src/schema.ts`  
+**Migrations:** Drizzle Kit (run `npm run db:push` to sync schema)
+
+## Entity Relationship Diagram
+
+```
+organizations (root tenant)
+    |
+    ├─► business_profiles (1:1)
+    ├─► customers
+    ├─► products
+    ├─► orders
+    │      └─► order_items
+    ├─► users
+    ├─► api_keys
+    └─► roles
+```
+
+## Core Tables
+
+### `organizations`
+
+**Purpose:** Root entity for multi-tenant isolation. Every data record belongs to one organization.
+
+```typescript
+export const organizationsTable = pgTable("organizations", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  gstNumber: text("gst_number"),
+  tier: text("tier").default("free").notNull(),
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+});
+```
+
+**Code:** `backend/src/schema.ts:104-110`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `text` | PRIMARY KEY | Unique org identifier (e.g., `org_abc123`) |
+| `name` | `text` | NOT NULL | Organization name |
+| `gst_number` | `text` | NULLABLE | GST registration number (India) |
+| `tier` | `text` | DEFAULT 'free' | Subscription tier (`free`, `pro`, `enterprise`) |
+| `created_at` | `timestamp` | DEFAULT NOW() | Org creation timestamp |
+
+**Relationships:**
+- One-to-many: `customers`, `products`, `orders`, `users`, `api_keys`, `roles`
+- One-to-one: `business_profiles`
+
+---
+
+### `business_profiles`
+
+**Purpose:** Business identity and tax configuration (1:1 with organizations).
+
+```typescript
+export const businessProfilesTable = pgTable("business_profiles", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").references(() => organizationsTable.id).notNull().unique(),
+  businessName: text("business_name").notNull(),
+  gstNumber: text("gst_number"),
+  taxRate: numeric("tax_rate", { precision: 5, scale: 2 }).default("18.00"),
+  currency: text("currency").default("INR"),
+  logoUrl: text("logo_url"),
+  address: text("address"),
+  phone: text("phone"),
+  email: text("email"),
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { mode: 'string' }).defaultNow().notNull(),
+});
+```
+
+**Code:** `backend/src/schema.ts:113-126`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `text` | PRIMARY KEY | Profile ID |
+| `organization_id` | `text` | FOREIGN KEY → `organizations.id`, UNIQUE | One profile per org |
+| `business_name` | `text` | NOT NULL | Business name (for invoices) |
+| `gst_number` | `text` | NULLABLE | GST number (India tax ID) |
+| `tax_rate` | `numeric(5,2)` | DEFAULT 18.00 | Tax percentage (e.g., 18% GST) |
+| `currency` | `text` | DEFAULT 'INR' | Currency code (ISO 4217) |
+| `logo_url` | `text` | NULLABLE | Logo URL for invoices |
+| `address` | `text` | NULLABLE | Business address |
+| `phone` | `text` | NULLABLE | Contact phone |
+| `email` | `text` | NULLABLE | Contact email |
+| `created_at` | `timestamp` | DEFAULT NOW() | Creation timestamp |
+| `updated_at` | `timestamp` | DEFAULT NOW() | Last update timestamp |
+
+**Constraints:**
+- `UNIQUE(organization_id)` - One-to-one relationship with organizations
+
+---
+
+### `customers`
+
+**Purpose:** Customer contact records extracted from chat messages.
+
+```typescript
+export const customersTable = pgTable("customers", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").references(() => organizationsTable.id).notNull(),
+  name: text("name"),
+  phone: text("phone"),
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+}, (table) => {
+  return {
+    orgPhoneIdx: index("org_phone_idx").on(table.organizationId, table.phone),
+  };
+});
+```
+
+**Code:** `backend/src/schema.ts:128-138`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `text` | PRIMARY KEY | Customer ID |
+| `organization_id` | `text` | FOREIGN KEY → `organizations.id` | Owning organization |
+| `name` | `text` | NULLABLE | Customer name (extracted from AI) |
+| `phone` | `text` | NULLABLE | Phone number (extracted from AI) |
+| `created_at` | `timestamp` | DEFAULT NOW() | Creation timestamp |
+
+**Indexes:**
+- `org_phone_idx` on `(organization_id, phone)` - Fast customer lookup by phone
+
+**Why Phone is Nullable:** AI may not extract phone from all messages.
+
+---
+
+### `orders`
+
+**Purpose:** Extracted orders from chat messages, including raw AI responses.
+
+```typescript
+export const ordersTable = pgTable("orders", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").references(() => organizationsTable.id).notNull(),
+  customerId: text("customer_id").references(() => customersTable.id).notNull(),
+  extractionType: text("extraction_type").notNull(), 
+  rawAiResponse: jsonb("raw_ai_response").notNull(),
+  totalAmount: numeric("total_amount", { precision: 12, scale: 2 }),
+  currency: text("currency").default("INR"),
+  
+  deliveryDate: timestamp("delivery_date", { mode: 'string' }),
+  deliveryAddress: text("delivery_address"),
+  specialInstructions: text("special_instructions"),
+  
+  rawMessages: jsonb("raw_messages").notNull(),
+  confidence: text("confidence").notNull(),
+  status: text("status").default("pending").notNull(),
+  invoice: jsonb("invoice").$type<Invoice>(),
+
+  invoiceSequence: integer("invoice_sequence"),
+  
+  deletedAt: timestamp("deleted_at", { mode: 'string' }),
+  
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+}, (table) => {
+  return {
+    statusIdx: index("status_idx").on(table.status),
+    extractionTypeIdx: index("extraction_type_idx").on(table.extractionType),
+    customerIdIdx: index("customer_id_idx").on(table.customerId),
+    orgIdx: index("org_idx").on(table.organizationId),
+    rawAiResponseGinIdx: index("raw_ai_response_gin_idx").using("gin", table.rawAiResponse),
+    rawMessagesGinIdx: index("raw_messages_gin_idx").using("gin", table.rawMessages),
+  };
+});
+```
+
+**Code:** `backend/src/schema.ts:140-172`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `text` | PRIMARY KEY | Order ID (e.g., `ord_abc123`) |
+| `organization_id` | `text` | FOREIGN KEY → `organizations.id` | Owning organization |
+| `customer_id` | `text` | FOREIGN KEY → `customers.id` | Customer who placed order |
+| `extraction_type` | `text` | NOT NULL | `single_message` or `chat_log` |
+| `raw_ai_response` | `jsonb` | NOT NULL | Full AI response (for audit/debugging) |
+| `total_amount` | `numeric(12,2)` | NULLABLE | Order total (calculated from items) |
+| `currency` | `text` | DEFAULT 'INR' | Currency code |
+| `delivery_date` | `timestamp` | NULLABLE | Requested delivery date (extracted from chat) |
+| `delivery_address` | `text` | NULLABLE | Delivery address (extracted from chat) |
+| `special_instructions` | `text` | NULLABLE | Special requests (extracted from chat) |
+| `raw_messages` | `jsonb` | NOT NULL | Original chat messages (for re-extraction) |
+| `confidence` | `text` | NOT NULL | `high`, `medium`, or `low` (AI confidence) |
+| `status` | `text` | DEFAULT 'pending' | `pending`, `confirmed`, `fulfilled`, `cancelled` |
+| `invoice` | `jsonb` | NULLABLE | Generated invoice JSON (from `/generate-invoice`) |
+| `invoice_sequence` | `integer` | NULLABLE | Invoice number sequence (per org) |
+| `deleted_at` | `timestamp` | NULLABLE | Soft delete timestamp (NULL = active) |
+| `created_at` | `timestamp` | DEFAULT NOW() | Order creation timestamp |
+
+**Indexes:**
+- `status_idx` on `status` - Fast filtering by status
+- `extraction_type_idx` on `extraction_type` - Filter by extraction method
+- `customer_id_idx` on `customer_id` - Customer order history
+- `org_idx` on `organization_id` - Org-level queries
+- `raw_ai_response_gin_idx` (GIN index) - Full-text search in AI responses
+- `raw_messages_gin_idx` (GIN index) - Full-text search in chat messages
+
+**Why JSONB for `raw_ai_response`:** Stores entire AI response for audit trails and debugging failed extractions.
+
+**Why Soft Deletes:** `deleted_at` allows "undo" functionality and regulatory compliance (never fully delete order history).
+
+---
+
+### `order_items`
+
+**Purpose:** Line items for each order (many-to-one with orders).
+
+```typescript
+export const orderItemsTable = pgTable("order_items", {
+  id: text("id").primaryKey(),
+  orderId: text("order_id").references(() => ordersTable.id).notNull(),
+  organizationId: text("organization_id").references(() => organizationsTable.id).notNull(),
+  productId: text("product_id").references(() => productsTable.id),
+  productName: text("product_name").notNull(),
+  quantity: numeric("quantity", { precision: 12, scale: 3 }).notNull(),
+  unit: text("unit"),
+  pricePerUnit: numeric("price_per_unit", { precision: 12, scale: 2 }),
+  totalPrice: numeric("total_price", { precision: 12, scale: 2 }),
+}, (table) => {
+  return {
+    orderIdIdx: index("order_items_order_id_idx").on(table.orderId),
+    orgIdx: index("order_items_org_idx").on(table.organizationId),
+  };
+});
+```
+
+**Code:** `backend/src/schema.ts:187-202`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `text` | PRIMARY KEY | Order item ID |
+| `order_id` | `text` | FOREIGN KEY → `orders.id` | Parent order |
+| `organization_id` | `text` | FOREIGN KEY → `organizations.id` | Owning organization |
+| `product_id` | `text` | FOREIGN KEY → `products.id`, NULLABLE | Linked product (if matched) |
+| `product_name` | `text` | NOT NULL | Product name (from AI extraction) |
+| `quantity` | `numeric(12,3)` | NOT NULL | Quantity (supports decimals: `2.5 kg`) |
+| `unit` | `text` | NULLABLE | Unit of measurement (`kg`, `pieces`, `liters`) |
+| `price_per_unit` | `numeric(12,2)` | NULLABLE | Price per unit (from product catalog or AI) |
+| `total_price` | `numeric(12,2)` | NULLABLE | `quantity * price_per_unit` |
+
+**Indexes:**
+- `order_items_order_id_idx` on `order_id` - Fast item lookup for an order
+- `order_items_org_idx` on `organization_id` - Org-level item queries
+
+**Why `product_id` is NULLABLE:** AI-extracted product names may not match catalog products. Manual linking happens later.
+
+**Why `numeric(12,3)` for quantity:** Supports fractional quantities (e.g., `1.250 kg`).
+
+---
+
+### `products`
+
+**Purpose:** Product catalog for price lookup and invoice generation.
+
+```typescript
+export const productsTable = pgTable("products", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").references(() => organizationsTable.id).notNull(),
+  name: text("name").notNull(),
+  unit: text("unit"),
+  defaultPrice: numeric("default_price", { precision: 12, scale: 2 }),
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+}, (table) => {
+  return {
+    orgProductNameIdx: index("org_product_name_idx").on(table.organizationId, table.name),
+  };
+});
+```
+
+**Code:** `backend/src/schema.ts:174-185`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `text` | PRIMARY KEY | Product ID |
+| `organization_id` | `text` | FOREIGN KEY → `organizations.id` | Owning organization |
+| `name` | `text` | NOT NULL | Product name |
+| `unit` | `text` | NULLABLE | Default unit (`kg`, `pieces`) |
+| `default_price` | `numeric(12,2)` | NULLABLE | Default price per unit |
+| `created_at` | `timestamp` | DEFAULT NOW() | Creation timestamp |
+
+**Indexes:**
+- `org_product_name_idx` on `(organization_id, name)` - Fast product lookup by name
+
+**Use Case:** AI extracts `"Tomato"` from chat → lookup in `products` table → populate `price_per_unit`.
+
+---
+
+## Authentication & Authorization Tables
+
+### `users`
+
+**Purpose:** Human users authenticated via Neon Auth (JWT).
+
+```typescript
+export const usersTable = pgTable("users", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull(),
+  name: text("name"),
+  organizationId: text("organization_id").references(() => organizationsTable.id),
+  role: text("role").default("member"),
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+});
+```
+
+**Code:** `backend/src/schema.ts:214-221`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `text` | PRIMARY KEY | User ID (from Neon Auth JWT `sub` claim) |
+| `email` | `text` | NOT NULL | User email (from JWT `email` claim) |
+| `name` | `text` | NULLABLE | Display name |
+| `organization_id` | `text` | FOREIGN KEY → `organizations.id`, NULLABLE | Assigned organization |
+| `role` | `text` | DEFAULT 'member' | Role (`admin`, `member`) |
+| `created_at` | `timestamp` | DEFAULT NOW() | First login timestamp |
+
+**How Users Join Organizations:**
+
+1. User logs in via Neon Auth (JWT issued)
+2. API verifies JWT and upserts user to `users` table (`backend/src/middlewares/authHandler.ts:71-85`)
+3. Admin assigns `organization_id` via dashboard
+4. Subsequent requests set `req.orgId = user.organizationId` (`backend/src/middlewares/authHandler.ts:90-92`)
+
+**JIT User Provisioning:** Users are automatically created on first login using `INSERT ... ON CONFLICT DO UPDATE`.
+
+---
+
+### `api_keys`
+
+**Purpose:** API key authentication for machine-to-machine access.
+
+```typescript
+export const apiKeysTable = pgTable("api_keys", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").references(() => organizationsTable.id).notNull(),
+  keyHash: text("key_hash").notNull(),
+  name: text("name").notNull(),
+  maskedKey: text("masked_key").notNull(),
+  isActive: boolean("is_active").default(true).notNull(),
+  lastUsedAt: timestamp("last_used_at", { mode: 'string' }),
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+}, (table) => {
+  return {
+    hashIdx: index("api_key_hash_idx").on(table.keyHash),
+  };
+});
+```
+
+**Code:** `backend/src/schema.ts:223-236`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `text` | PRIMARY KEY | API key ID |
+| `organization_id` | `text` | FOREIGN KEY → `organizations.id` | Owning organization |
+| `key_hash` | `text` | NOT NULL, INDEXED | SHA-256 hash of API key |
+| `name` | `text` | NOT NULL | Human-readable key name |
+| `masked_key` | `text` | NOT NULL | Masked key for display (e.g., `sk-...abc123`) |
+| `is_active` | `boolean` | DEFAULT TRUE | Key revocation flag |
+| `last_used_at` | `timestamp` | NULLABLE | Last usage timestamp |
+| `created_at` | `timestamp` | DEFAULT NOW() | Creation timestamp |
+
+**Indexes:**
+- `api_key_hash_idx` on `key_hash` - Fast key lookup during authentication
+
+**Security:**
+- **Never stored plaintext:** Only SHA-256 hash is stored
+- **Constant-time comparison:** Uses `crypto.timingSafeEqual()` to prevent timing attacks (`backend/src/middlewares/authHandler.ts:48-52`)
+- **Active flag:** Revoked keys rejected at auth layer
+
+**Authentication Flow:**
+
+```typescript
+1. Client sends: X-API-Key: sk-abc123...
+2. API computes: SHA-256(sk-abc123...)
+3. API queries: SELECT * FROM api_keys WHERE key_hash = <hash> AND is_active = true
+4. API compares: crypto.timingSafeEqual(storedHash, incomingHash)
+5. API sets: req.orgId = apiKey.organizationId
+```
+
+**Code:** `backend/src/middlewares/authHandler.ts:27-56`
+
+---
+
+### `roles`
+
+**Purpose:** Role-based access control (RBAC) with custom permissions.
+
+```typescript
+export const rolesTable = pgTable("roles", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").references(() => organizationsTable.id).notNull(),
+  name: text("name").notNull(),
+  permissions: jsonb("permissions").$type<string[]>().notNull().default([]),
+  createdAt: timestamp("created_at", { mode: 'string' }).defaultNow().notNull(),
+});
+```
+
+**Code:** `backend/src/schema.ts:206-212`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `text` | PRIMARY KEY | Role ID |
+| `organization_id` | `text` | FOREIGN KEY → `organizations.id` | Owning organization |
+| `name` | `text` | NOT NULL | Role name (`Admin`, `Sales Rep`, `Viewer`) |
+| `permissions` | `jsonb` | NOT NULL, DEFAULT [] | Array of permission strings |
+| `created_at` | `timestamp` | DEFAULT NOW() | Creation timestamp |
+
+**Permission Strings (Example):**
+
+```json
+[
+  "orders:read",
+  "orders:write",
+  "invoices:generate",
+  "api_keys:manage"
+]
+```
+
+**Future Use:** RBAC middleware will check `user.role` → `roles.permissions` → allow/deny request.
+
+---
+
+## Data Types & Precision
+
+### Numeric Columns
+
+| Column | Type | Precision | Use Case |
+|--------|------|-----------|----------|
+| `tax_rate` | `numeric(5,2)` | 2 decimal places | Tax percentages (e.g., `18.00%`) |
+| `total_amount` | `numeric(12,2)` | 2 decimal places | Currency (e.g., `1234567.89`) |
+| `price_per_unit` | `numeric(12,2)` | 2 decimal places | Currency |
+| `total_price` | `numeric(12,2)` | 2 decimal places | Currency |
+| `quantity` | `numeric(12,3)` | 3 decimal places | Fractional quantities (e.g., `2.500 kg`) |
+
+**Why `numeric` over `float`?** Avoids floating-point rounding errors in financial calculations.
+
+### Timestamp Columns
+
+**All timestamps use `{ mode: 'string' }` in Drizzle:**
+
+```typescript
+timestamp("created_at", { mode: 'string' })
+```
+
+- Returns ISO 8601 strings (e.g., `2025-03-04T12:34:56.789Z`)
+- Avoids timezone conversion issues
+- Compatible with JSON serialization
+
+### JSONB Columns
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `raw_ai_response` | `jsonb` | Full Anthropic API response |
+| `raw_messages` | `jsonb` | Array of chat messages |
+| `invoice` | `jsonb` | Generated invoice JSON |
+| `permissions` | `jsonb` | Array of permission strings |
+
+**Why JSONB?**
+
+- **GIN Indexing:** Fast full-text search (`@>`, `?`, `?|` operators)
+- **Schema Flexibility:** AI responses change over time
+- **No Joins:** Denormalized data for fast reads
+
+**Code:** `backend/src/schema.ts:145, 153, 156, 210`
+
+---
+
+## Indexes & Query Optimization
+
+### B-Tree Indexes (Standard)
+
+| Index | Columns | Purpose |
+|-------|---------|----------|
+| `org_phone_idx` | `(organization_id, phone)` | Customer lookup by phone |
+| `status_idx` | `status` | Filter orders by status |
+| `extraction_type_idx` | `extraction_type` | Filter by extraction method |
+| `customer_id_idx` | `customer_id` | Customer order history |
+| `org_idx` | `organization_id` | Org-level order queries |
+| `order_items_order_id_idx` | `order_id` | Fetch items for an order |
+| `order_items_org_idx` | `organization_id` | Org-level item queries |
+| `org_product_name_idx` | `(organization_id, name)` | Product lookup by name |
+| `api_key_hash_idx` | `key_hash` | API key authentication |
+
+### GIN Indexes (Full-Text Search)
+
+| Index | Column | Purpose |
+|-------|--------|----------|
+| `raw_ai_response_gin_idx` | `raw_ai_response` | Search AI responses |
+| `raw_messages_gin_idx` | `raw_messages` | Search chat messages |
+
+**Example Query:**
+
+```sql
+-- Find orders mentioning "urgent delivery"
+SELECT * FROM orders
+WHERE raw_messages @> '[{"text": "urgent delivery"}]'::jsonb;
+```
+
+**Code:** `backend/src/schema.ts:169-170`
+
+---
+
+## Multi-Tenant Isolation
+
+### Row-Level Security Pattern
+
+**Every query includes `organization_id` in WHERE clause:**
+
+```typescript
+// Example: Fetch orders for current org
+const orders = await db
+  .select()
+  .from(ordersTable)
+  .where(eq(ordersTable.organizationId, req.orgId)); // ← Tenant filter
+```
+
+**Why No PostgreSQL RLS Policies?**
+
+- Application-level enforcement is simpler for multi-tenant SaaS
+- Drizzle ORM makes it easy to enforce in code
+- Future: Can add PostgreSQL RLS as defense-in-depth
+
+### Foreign Key Cascade Rules
+
+**No cascading deletes configured:**
+
+- Deleting an organization requires explicit cleanup
+- Prevents accidental data loss
+- Allows soft deletes (`deleted_at` column)
+
+---
+
+## Drizzle ORM Usage
+
+### Type-Safe Schemas
+
+```typescript
+// Automatically generated from pgTable definitions
+export type Organization = z.infer<typeof selectOrganizationSchema>;
+export type InsertOrder = z.infer<typeof insertOrderSchema>;
+export type SelectOrder = z.infer<typeof selectOrderSchema>;
+```
+
+**Code:** `backend/src/schema.ts:240-272`
+
+### Schema Sync
+
+```bash
+# Push schema changes to database (no migrations)
+npm run db:push
+
+# Generate migrations
+npm run db:generate
+
+# Run migrations
+npm run db:migrate
+```
+
+**Drizzle Kit Config:** `drizzle.config.ts`
+
+---
+
+## Sample Queries
+
+### Fetch Orders with Items
+
+```typescript
+import { db } from './config/db';
+import { ordersTable, orderItemsTable } from './schema';
+import { eq } from 'drizzle-orm';
+
+const ordersWithItems = await db
+  .select()
+  .from(ordersTable)
+  .leftJoin(orderItemsTable, eq(ordersTable.id, orderItemsTable.orderId))
+  .where(eq(ordersTable.organizationId, orgId));
+```
+
+### Create Order with Items (Transaction)
+
+```typescript
+await db.transaction(async (tx) => {
+  // Insert order
+  const [order] = await tx.insert(ordersTable).values({
+    id: 'ord_123',
+    organizationId: 'org_abc',
+    customerId: 'cust_xyz',
+    // ...
+  }).returning();
+
+  // Insert items
+  await tx.insert(orderItemsTable).values([
+    { id: 'item_1', orderId: order.id, productName: 'Tomato', quantity: '10' },
+    { id: 'item_2', orderId: order.id, productName: 'Onion', quantity: '5' },
+  ]);
+});
+```
+
+### Soft Delete Order
+
+```typescript
+await db
+  .update(ordersTable)
+  .set({ deletedAt: new Date().toISOString() })
+  .where(eq(ordersTable.id, orderId));
+```
+
+### Search Orders by Customer Name (Full-Text)
+
+```typescript
+import { sql } from 'drizzle-orm';
+
+const results = await db
+  .select()
+  .from(ordersTable)
+  .where(
+    sql`${ordersTable.rawMessages} @> ${JSON.stringify([{ sender: 'Customer Name' }])}::jsonb`
+  );
+```
+
+---
+
+## Migration Strategy
+
+### Current Approach: `db:push`
+
+**For development:**
+
+```bash
+npm run db:push
+```
+
+Directly syncs `schema.ts` to PostgreSQL without migration files.
+
+### Production Approach: Migrations
+
+**Generate migration:**
+
+```bash
+npm run db:generate
+```
+
+Creates SQL migration files in `drizzle/` directory.
+
+**Run migration:**
+
+```bash
+npm run db:migrate
+```
+
+Applies migrations to production database.
+
+**Why Migrations for Production?**
+
+- Version control for schema changes
+- Rollback capability
+- Audit trail for compliance
+
+---
+
+## Performance Considerations
+
+### Query Performance
+
+- **Indexed lookups:** ~1-5ms (B-tree indexes)
+- **Full-text search:** ~10-50ms (GIN indexes)
+- **Joins:** ~5-20ms (foreign key indexes)
+
+### Connection Pooling
+
+Drizzle ORM uses PostgreSQL connection pooling:
+
+```typescript
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { Pool } from 'pg';
+
+const pool = new Pool({
+  connectionString: env.DATABASE_URL,
+  max: 20, // Max 20 connections
+});
+
+export const db = drizzle(pool);
+```
+
+### Scaling Limits
+
+| Metric | Limit | Notes |
+|--------|-------|-------|
+| Max connections | 100 | PostgreSQL default |
+| Table size | 10M+ rows | GIN indexes keep queries fast |
+| JSONB columns | 1MB per row | Compressed by PostgreSQL |
+
+---
+
+## Security Best Practices
+
+### SQL Injection Prevention
+
+**Drizzle ORM uses parameterized queries:**
+
+```typescript
+// Safe: Parameters are escaped
+const orders = await db
+  .select()
+  .from(ordersTable)
+  .where(eq(ordersTable.id, userInput));
+
+// Dangerous: Raw SQL (avoid unless necessary)
+const results = await db.execute(sql`SELECT * FROM orders WHERE id = ${userInput}`);
+```
+
+### Secrets Management
+
+**Never commit to git:**
+
+- `DATABASE_URL`
+- API keys
+- JWT secrets
+
+Use environment variables (`.env` file + Docker Compose secrets).
+
+### Audit Logging
+
+**Track changes with timestamps:**
+
+- `created_at` on all tables
+- `updated_at` on `business_profiles`
+- `deleted_at` for soft deletes
+
+**Future:** Add `audit_log` table for compliance.
+
+---
+
+## Schema File Location
+
+**Full schema:** `backend/src/schema.ts:1-272`

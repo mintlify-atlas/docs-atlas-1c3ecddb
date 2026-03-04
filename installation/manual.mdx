@@ -1,0 +1,484 @@
+---
+title: "Manual Installation"
+description: "Set up Chat2Cash locally for development without Docker"
+---
+
+## Overview
+
+This guide walks through installing Chat2Cash manually for local development. You'll run PostgreSQL, Redis, the API server, and workers directly on your machine.
+
+<Info>
+  For production deployments, use the [Docker setup](/installation/docker) instead.
+</Info>
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Node.js" icon="node-js">
+    Version 18 or higher required
+    
+    ```bash
+    node --version
+    # v18.0.0 or higher
+    ```
+  </Card>
+  
+  <Card title="PostgreSQL" icon="database">
+    Version 12 or higher
+    
+    [Download PostgreSQL](https://www.postgresql.org/download/)
+  </Card>
+  
+  <Card title="Redis" icon="bolt">
+    Version 6 or higher
+    
+    [Download Redis](https://redis.io/download/)
+  </Card>
+  
+  <Card title="Anthropic API Key" icon="key">
+    Required for AI extraction
+    
+    [Get API key](https://console.anthropic.com/)
+  </Card>
+</CardGroup>
+
+## Installation
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/yourusername/chat2cash.git
+    cd chat2cash
+    ```
+  </Step>
+
+  <Step title="Install dependencies">
+    Navigate to the backend directory and install packages:
+    
+    <CodeGroup>
+    ```bash npm
+    cd backend
+    npm install
+    ```
+    
+    ```bash pnpm
+    cd backend
+    pnpm install
+    ```
+    
+    ```bash yarn
+    cd backend
+    yarn install
+    ```
+    </CodeGroup>
+    
+    This installs:
+    - Express.js for the API server
+    - Drizzle ORM for database operations
+    - BullMQ for job queues
+    - Anthropic SDK for Claude API
+    - PDFKit for invoice generation
+    - Sentry for error tracking (optional)
+  </Step>
+
+  <Step title="Set up PostgreSQL">
+    Create a database for Chat2Cash:
+    
+    ```bash
+    # Connect to PostgreSQL
+    psql postgres
+    ```
+    
+    ```sql
+    -- Create database
+    CREATE DATABASE chat2cash;
+    
+    -- Create user (optional)
+    CREATE USER chat2cash_user WITH PASSWORD 'your_password';
+    GRANT ALL PRIVILEGES ON DATABASE chat2cash TO chat2cash_user;
+    
+    -- Exit
+    \q
+    ```
+    
+    <Tip>
+      On macOS with Homebrew: `brew services start postgresql`
+      
+      On Ubuntu: `sudo systemctl start postgresql`
+    </Tip>
+  </Step>
+
+  <Step title="Start Redis">
+    Redis must be running for job queues to work:
+    
+    ```bash
+    # Start Redis with AOF persistence
+    redis-server --appendonly yes --appendfsync everysec
+    ```
+    
+    In a separate terminal, verify Redis is running:
+    
+    ```bash
+    redis-cli ping
+    # Expected: PONG
+    ```
+    
+    <Tip>
+      On macOS with Homebrew: `brew services start redis`
+      
+      On Ubuntu: `sudo systemctl start redis`
+    </Tip>
+  </Step>
+
+  <Step title="Configure environment variables">
+    Create a `.env` file in the `backend/` directory:
+    
+    ```bash backend/.env
+    # Server
+    NODE_ENV=development
+    PORT=3000
+    
+    # Database
+    DATABASE_URL=postgres://user:password@localhost:5432/chat2cash
+    
+    # Redis
+    REDIS_URL=redis://localhost:6379
+    
+    # Anthropic AI
+    ANTHROPIC_API_KEY=sk-ant-api03-...
+    AI_MODEL_FAST=claude-3-haiku-20240307
+    AI_MODEL_SMART=claude-3-5-sonnet-20241022
+    AI_REQUEST_TIMEOUT_MS=60000
+    
+    # Business Defaults
+    DEFAULT_BUSINESS_NAME=My Saree Shop
+    DEFAULT_GST_NUMBER=22AAAAA0000A1Z5
+    
+    # Rate Limiting
+    RATE_LIMIT_FREE=20
+    RATE_LIMIT_PRO=200
+    RATE_LIMIT_ENTERPRISE=2000
+    RATE_LIMIT_WINDOW_MS=900000
+    
+    # Optional: Error Tracking
+    SENTRY_DSN=https://your-sentry-dsn@sentry.io/...
+    
+    # Optional: CORS
+    FRONTEND_URL=http://localhost:5173
+    ```
+    
+    <Warning>
+      Replace `sk-ant-api03-...` with your actual Anthropic API key.
+    </Warning>
+    
+    See [Configuration](/configuration) for detailed explanations of each variable.
+  </Step>
+
+  <Step title="Run database migrations">
+    Push the schema to your PostgreSQL database:
+    
+    ```bash
+    npm run db:push
+    ```
+    
+    This creates the following tables:
+    - `orders` - Extracted order records
+    - `order_items` - Line items for each order
+    - `business_profiles` - GST and business info
+    - `customers` - Customer contact details
+    
+    Expected output:
+    
+    ```
+    📦 Pushing schema to database...
+    ✅ Schema synced successfully
+    ```
+  </Step>
+
+  <Step title="Start the API server">
+    Run the development server with hot reload:
+    
+    ```bash
+    npm run dev
+    ```
+    
+    The API will start on `http://localhost:3000`.
+    
+    You should see:
+    
+    ```
+    🚀 Chat2Cash API server running on port 3000
+    ✓ Database connected
+    ✓ Redis connected
+    ✓ Claude API ready
+    ```
+  </Step>
+
+  <Step title="Start worker processes">
+    In a **separate terminal**, start the background worker:
+    
+    ```bash
+    cd backend
+    npm run dev:worker
+    ```
+    
+    Expected output:
+    
+    ```
+    🔧 Worker started
+    ✓ Connected to Redis queue
+    👂 Listening for extraction jobs...
+    ```
+    
+    <Info>
+      For production, run multiple worker processes in parallel using a process manager like PM2.
+    </Info>
+  </Step>
+</Steps>
+
+## Verify Installation
+
+Test that everything is working:
+
+<Steps>
+  <Step title="Check API health">
+    ```bash
+    curl http://localhost:3000/api/health
+    ```
+    
+    Expected response:
+    
+    ```json
+    {
+      "status": "healthy",
+      "timestamp": "2026-03-04T18:30:00Z",
+      "services": {
+        "database": "connected",
+        "redis": "connected",
+        "ai": "ready"
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Test synchronous extraction">
+    ```bash
+    curl -X POST http://localhost:3000/api/extract \
+      -H "Content-Type: application/json" \
+      -d '{
+        "sender": "+919876543210",
+        "message": "bhaiya 2 kilo aaloo bhej do"
+      }'
+    ```
+    
+    You should see structured JSON with extracted items.
+  </Step>
+
+  <Step title="Test async job processing">
+    Queue a background job:
+    
+    ```bash
+    curl -X POST http://localhost:3000/api/async/extract \
+      -H "Content-Type: application/json" \
+      -d '{
+        "sender": "+919876543210",
+        "message": "1 kg tamatar chahiye"
+      }'
+    ```
+    
+    Response:
+    
+    ```json
+    {
+      "job_id": "job_abc123",
+      "status": "queued"
+    }
+    ```
+    
+    Check the worker terminal - you should see it processing the job.
+    
+    Check job status:
+    
+    ```bash
+    curl http://localhost:3000/api/jobs/job_abc123
+    ```
+  </Step>
+</Steps>
+
+## Development Workflow
+
+### Project Structure
+
+```
+backend/
+├── src/
+│   ├── config/          # Database, Redis, environment config
+│   │   ├── env.ts       # Environment variable validation
+│   │   ├── db.ts        # PostgreSQL connection
+│   │   └── redis.ts     # Redis connection
+│   ├── controllers/     # HTTP request handlers
+│   ├── middlewares/     # Express middleware (logging, auth, etc.)
+│   ├── routes/          # API route definitions
+│   ├── services/        # Business logic
+│   │   ├── ai.ts        # Claude API integration
+│   │   ├── pdf.ts       # Invoice generation
+│   │   ├── queue.ts     # BullMQ job management
+│   │   └── storage.ts   # Database operations
+│   ├── schema.ts        # Drizzle ORM schema
+│   ├── index.ts         # API server entry point
+│   └── worker.ts        # Worker process entry point
+├── package.json
+├── tsconfig.json
+└── drizzle.config.ts
+```
+
+### Available Scripts
+
+```json package.json
+{
+  "scripts": {
+    "dev": "tsx watch src/index.ts",           // API with hot reload
+    "dev:worker": "tsx watch src/worker.ts",   // Worker with hot reload
+    "build": "tsc",                            // Compile TypeScript
+    "start": "node dist/index.js",             // Production API
+    "start:worker": "node dist/worker.js",     // Production worker
+    "db:push": "drizzle-kit push",             // Sync schema to DB
+    "test": "vitest run",                      // Run tests
+    "test:watch": "vitest"                     // Watch mode
+  }
+}
+```
+
+### Making Changes
+
+1. **Modify the schema** (`src/schema.ts`):
+   ```bash
+   npm run db:push  # Sync changes to PostgreSQL
+   ```
+
+2. **Edit API routes** (`src/routes/`):
+   - The dev server auto-reloads on file changes
+
+3. **Update AI prompts** (`src/services/ai.ts`):
+   - Changes apply immediately in dev mode
+
+4. **Add new environment variables** (`src/config/env.ts`):
+   - Update the Zod schema
+   - Add to `.env`
+   - Restart the server
+
+### Running Tests
+
+```bash
+# Run all tests
+npm test
+
+# Run in watch mode
+npm run test:watch
+
+# Run specific test suites
+npm run test:unit
+npm run test:integration
+
+# Generate coverage report
+npm run test:coverage
+```
+
+## Troubleshooting
+
+### "DATABASE_URL must be a valid connection string"
+
+Check your `.env` file:
+- Ensure `DATABASE_URL` is properly formatted
+- Verify PostgreSQL is running: `psql -U user -d chat2cash`
+
+### "Redis connection refused"
+
+```bash
+# Check if Redis is running
+redis-cli ping
+
+# Start Redis
+redis-server --appendonly yes
+```
+
+### "ANTHROPIC_API_KEY is required"
+
+Verify your `.env` file contains:
+```bash
+ANTHROPIC_API_KEY=sk-ant-api03-...
+```
+
+Restart the server after adding it.
+
+### Worker not processing jobs
+
+1. Check that both API and worker are running
+2. Verify Redis connection in both processes
+3. Check worker logs for errors
+4. Inspect the queue:
+   ```bash
+   curl http://localhost:3000/api/queue/health
+   ```
+
+### Port 3000 already in use
+
+Change the port in `.env`:
+```bash
+PORT=3001
+```
+
+Or kill the process:
+```bash
+lsof -ti:3000 | xargs kill -9
+```
+
+## Production Build
+
+For production deployments:
+
+```bash
+# Compile TypeScript to JavaScript
+npm run build
+
+# Start production API
+NODE_ENV=production npm start
+
+# Start production worker (in separate process)
+NODE_ENV=production npm run start:worker
+```
+
+Consider using a process manager:
+
+```bash
+# Install PM2
+npm install -g pm2
+
+# Start API with 4 instances
+pm2 start dist/index.js -i 4 --name chat2cash-api
+
+# Start 2 worker processes
+pm2 start dist/worker.js -i 2 --name chat2cash-worker
+
+# View logs
+pm2 logs
+
+# Monitor
+pm2 monit
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Configure environment variables and business profiles
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api/endpoints/extract">
+    Explore available endpoints
+  </Card>
+  
+  <Card title="Docker Setup" icon="docker" href="/installation/docker">
+    Deploy with Docker for production
+  </Card>
+</CardGroup>

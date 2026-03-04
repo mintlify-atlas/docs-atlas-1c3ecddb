@@ -1,0 +1,373 @@
+---
+title: Error Tracking
+description: Sentry integration for crash reporting, error monitoring, and distributed tracing
+---
+
+Chat2Cash integrates Sentry for real-time error tracking, performance monitoring, and distributed tracing across API and worker tiers.
+
+## Sentry Initialization
+
+Sentry is initialized at application startup with environment-specific configuration:
+
+```typescript
+// From app.ts:13-23
+if (env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: env.SENTRY_DSN,
+    environment: env.NODE_ENV,
+    tracesSampleRate: env.NODE_ENV === "production" ? 0.2 : 1.0,
+    integrations: [
+      Sentry.httpIntegration(),
+      Sentry.expressIntegration(),
+    ],
+  });
+}
+```
+
+**Configuration:**
+- **DSN:** Set via `SENTRY_DSN` environment variable
+- **Environment:** Matches `NODE_ENV` (development, staging, production)
+- **Traces Sample Rate:** 
+  - Production: 20% of requests (reduces volume/cost)
+  - Development: 100% (full visibility during testing)
+
+## Express Middleware
+
+Sentry's Express error handler captures unhandled exceptions and logs them before the global error handler:
+
+```typescript
+// From app.ts:51-56
+// Sentry error handler must be registered before the global error handler
+if (env.SENTRY_DSN) {
+  Sentry.setupExpressErrorHandler(app);
+}
+
+app.use(globalErrorHandler);
+```
+
+**Middleware order:**
+1. Request middleware (CORS, body parser, auth, etc.)
+2. Route handlers
+3. **Sentry error handler** (captures errors)
+4. Global error handler (formats response)
+
+## Automatic Error Capture
+
+All unhandled exceptions are automatically captured:
+
+```typescript
+router.post("/orders/extract", async (req, res) => {
+  const order = await extractOrder(req.body);
+  // If extractOrder() throws, Sentry captures it automatically
+  res.json(order);
+});
+```
+
+**Captured context:**
+- Request URL, method, headers
+- User agent and IP address
+- Stack trace and error message
+- User ID (if authenticated via `req.user`)
+- Organization ID (from `req.orgId`)
+
+## Manual Error Capture
+
+For business logic errors or background jobs, capture errors manually:
+
+```typescript
+import * as Sentry from "@sentry/node";
+
+try {
+  await processPayment(orderId);
+} catch (error) {
+  Sentry.captureException(error, {
+    tags: { orderId, paymentProvider: "stripe" },
+    extra: { amount, currency },
+  });
+  throw error; // Re-throw to trigger global error handler
+}
+```
+
+## Worker Error Tracking
+
+### Extraction Worker
+
+Failed jobs are reported to Sentry only after all retry attempts are exhausted:
+
+```typescript
+// From queueService.ts:137-157
+worker.on("failed", (job, err) => {
+  const isFinalAttempt = job !== undefined &&
+    job.attemptsMade >= (job.opts.attempts ?? 1);
+
+  if (isFinalAttempt) {
+    // Alert on hard-fail (all retries exhausted) so the team sees it immediately
+    logger.error({ jobId: job?.id, err }, "Extraction job hard-failed (DLQ)");
+    if (env.SENTRY_DSN) {
+      Sentry.captureException(err, {
+        tags: { queue: "order-extraction", jobId: job?.id ?? "unknown" },
+        extra: {
+          orgId: job?.data.orgId,
+          type: job?.data.type,
+          correlationId: job?.data.correlationId,
+          attemptsMade: job?.attemptsMade,
+        },
+      });
+    }
+  } else {
+    logger.warn({ jobId: job?.id, attempt: job?.attemptsMade, err }, "Extraction job failed (will retry)");
+  }
+});
+```
+
+**Rationale:** Transient errors (network timeouts, rate limits) shouldn't trigger alerts. Only permanent failures require investigation.
+
+### Webhook Worker
+
+Webhook failures are tracked similarly, with special handling for unrecoverable errors:
+
+```typescript
+// From queueService.ts:233-263
+webhookWorker.on("failed", (job, err) => {
+  const isFinalAttempt = job !== undefined &&
+    job.attemptsMade >= (job.opts.attempts ?? 1);
+  const isUnrecoverable = err instanceof UnrecoverableError;
+
+  if (isFinalAttempt || isUnrecoverable) {
+    logger.error(
+      { jobId: job?.id, webhookUrl: job?.data.webhookUrl, err: err.message },
+      `Webhook delivery hard-failed${isUnrecoverable ? " (unrecoverable)" : " (retries exhausted)"}`
+    );
+    if (env.SENTRY_DSN) {
+      Sentry.captureException(err, {
+        tags: {
+          queue: "webhook-delivery",
+          jobId: job?.id ?? "unknown",
+          unrecoverable: String(isUnrecoverable),
+        },
+        extra: {
+          webhookUrl: job?.data.webhookUrl,
+          correlationId: job?.data.correlationId,
+          attemptsMade: job?.attemptsMade,
+        },
+      });
+    }
+  } else {
+    logger.warn(
+      { jobId: job?.id, attempt: job?.attemptsMade, maxAttempts: 10, err: err.message },
+      "Webhook delivery failed (will retry)"
+    );
+  }
+});
+```
+
+## Error Context Enrichment
+
+### Tags
+
+Tags are indexed and searchable in Sentry:
+
+```typescript
+Sentry.captureException(error, {
+  tags: {
+    queue: "order-extraction",
+    orgId: "org_123",
+    severity: "critical",
+  },
+});
+```
+
+**Common tags:**
+- `queue`: Job queue name (extraction, webhook)
+- `orgId`: Organization ID for filtering
+- `jobId`: BullMQ job ID
+- `environment`: Automatically set by Sentry (dev, staging, prod)
+
+### Extra Context
+
+Extra context provides non-indexed metadata:
+
+```typescript
+Sentry.captureException(error, {
+  extra: {
+    correlationId: "abc-123",
+    attemptsMade: 3,
+    maxAttempts: 10,
+    payload: JSON.stringify(data),
+  },
+});
+```
+
+## Distributed Tracing
+
+Sentry automatically traces HTTP requests with the `httpIntegration`:
+
+```typescript
+// From app.ts:19-20
+integrations: [
+  Sentry.httpIntegration(),
+  Sentry.expressIntegration(),
+]
+```
+
+**Captured spans:**
+- Incoming HTTP requests
+- Database queries (via Drizzle ORM integration)
+- External API calls (fetch, axios)
+
+### Viewing Traces in Sentry
+
+1. Navigate to **Performance** → **Traces**
+2. Filter by transaction name (e.g., `POST /api/orders/extract`)
+3. View waterfall diagram showing:
+   - Request duration
+   - Database query time
+   - External API latency
+   - Queue enqueue time
+
+## Configuration
+
+### Environment Variables
+
+```bash
+# Sentry DSN (required)
+SENTRY_DSN=https://abc123@o123456.ingest.sentry.io/7890123
+
+# Environment name (optional, defaults to NODE_ENV)
+SENTRY_ENVIRONMENT=production
+
+# Release version (optional, for tracking deployments)
+SENTRY_RELEASE=v1.2.3
+```
+
+### Sample Rate Tuning
+
+Adjust `tracesSampleRate` based on traffic volume:
+
+```typescript
+tracesSampleRate: env.NODE_ENV === "production" ? 0.1 : 1.0
+```
+
+- **0.1 (10%):** High-traffic production (greater than 10k req/day)
+- **0.2 (20%):** Medium traffic (1k-10k req/day)
+- **1.0 (100%):** Development or low traffic (less than 1k req/day)
+
+## Alert Configuration
+
+Set up alerts in Sentry UI:
+
+1. Navigate to **Alerts** → **Create Alert**
+2. Choose **Issues** for error alerts or **Metric Alerts** for thresholds
+3. Configure conditions:
+   - **Error threshold:** >10 errors in 5 minutes
+   - **Filter:** `queue:order-extraction AND environment:production`
+4. Set notification channel (email, Slack, PagerDuty)
+
+## Common Patterns
+
+### Suppressing Noisy Errors
+
+Filter out expected errors using `beforeSend`:
+
+```typescript
+Sentry.init({
+  dsn: env.SENTRY_DSN,
+  beforeSend(event, hint) {
+    const error = hint.originalException;
+    
+    // Ignore user-triggered validation errors
+    if (error instanceof AppError && error.statusCode < 500) {
+      return null;
+    }
+    
+    // Ignore known network timeouts
+    if (error?.message?.includes("ETIMEDOUT")) {
+      return null;
+    }
+    
+    return event;
+  },
+});
+```
+
+### Capture User Feedback
+
+```typescript
+Sentry.captureException(error, {
+  user: {
+    id: req.user?.id,
+    email: req.user?.email,
+    orgId: req.orgId,
+  },
+});
+```
+
+### Breadcrumbs for Context
+
+Sentry automatically captures breadcrumbs, but you can add custom ones:
+
+```typescript
+Sentry.addBreadcrumb({
+  category: "payment",
+  message: "Payment intent created",
+  level: "info",
+  data: { paymentIntentId, amount },
+});
+```
+
+## Monitoring Dead Letter Queues
+
+Create a Sentry dashboard to track DLQ metrics:
+
+1. Create a **Metric Alert** for `queue:order-extraction` errors
+2. Filter by `unrecoverable:true` to identify permanent failures
+3. Set up Slack notifications for immediate triage
+
+## Best Practices
+
+<Steps>
+  <Step title="Only capture final failures">
+    Avoid alerting on retryable errors. Use `attemptsMade >= maxAttempts` checks.
+  </Step>
+  
+  <Step title="Enrich context with tags">
+    Add `orgId`, `jobId`, `queue`, and `correlationId` to every capture.
+  </Step>
+  
+  <Step title="Link errors to logs">
+    Include `correlationId` in both Sentry and logs for cross-referencing.
+  </Step>
+  
+  <Step title="Set up release tracking">
+    Tag errors with `SENTRY_RELEASE` to identify regressions after deployments.
+  </Step>
+  
+  <Step title="Configure alert fatigue thresholds">
+    Use Sentry's **Alert Rules** to batch notifications and avoid spam.
+  </Step>
+</Steps>
+
+## Integration with Logging
+
+Sentry and Pino logs share the same `correlationId`:
+
+**Pino log:**
+```json
+{
+  "level": 50,
+  "msg": "Extraction job hard-failed (DLQ)",
+  "jobId": "45678",
+  "correlationId": "abc-123"
+}
+```
+
+**Sentry event:**
+```json
+{
+  "message": "Anthropic API rate limit exceeded",
+  "tags": { "queue": "order-extraction", "jobId": "45678" },
+  "extra": { "correlationId": "abc-123" }
+}
+```
+
+Search logs by `correlationId` to see the full request lifecycle leading to the error.
