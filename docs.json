@@ -103,6 +103,7 @@
               "api/endpoints/list-orders",
               "api/endpoints/get-order",
               "api/endpoints/update-order",
+              "api/endpoints/edit-order",
               "api/endpoints/delete-order"
             ]
           },
