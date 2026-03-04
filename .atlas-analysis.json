@@ -1,0 +1,157 @@
+{
+  "projectType": "saas",
+  "projectName": "Chat2Cash",
+  "projectDescription": "AI-powered revenue recovery system for India's WhatsApp-first SMB businesses",
+  "theme": "palm",
+  "primaryColor": "#25D366",
+  "lightColor": "#DCF8C6",
+  "darkColor": "#075E54",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "introduction",
+              "why-chat2cash",
+              "how-it-works"
+            ]
+          },
+          {
+            "group": "Getting Started",
+            "pages": [
+              "quickstart",
+              "installation/docker",
+              "installation/manual",
+              "configuration"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/ai-extraction",
+              "features/order-management",
+              "features/invoice-generation",
+              "features/async-processing"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/database-schema",
+              "architecture/queue-system",
+              "architecture/multi-tenant"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker-compose",
+              "deployment/scaling",
+              "deployment/environment-variables"
+            ]
+          },
+          {
+            "group": "Security & Observability",
+            "pages": [
+              "security/authentication",
+              "security/rate-limiting",
+              "security/pii-redaction",
+              "observability/logging",
+              "observability/error-tracking"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "api/overview",
+              "api/authentication"
+            ]
+          },
+          {
+            "group": "Extraction",
+            "pages": [
+              "api/endpoints/extract",
+              "api/endpoints/extract-order",
+              "api/endpoints/async-extract",
+              "api/endpoints/async-extract-order"
+            ]
+          },
+          {
+            "group": "Orders",
+            "pages": [
+              "api/endpoints/list-orders",
+              "api/endpoints/get-order",
+              "api/endpoints/update-order",
+              "api/endpoints/delete-order"
+            ]
+          },
+          {
+            "group": "Invoices",
+            "pages": [
+              "api/endpoints/generate-invoice",
+              "api/endpoints/download-invoice"
+            ]
+          },
+          {
+            "group": "Jobs & Queue",
+            "pages": [
+              "api/endpoints/job-status",
+              "api/endpoints/job-stream",
+              "api/endpoints/queue-health"
+            ]
+          },
+          {
+            "group": "Admin",
+            "pages": [
+              "api/endpoints/dlq-list",
+              "api/endpoints/dlq-retry",
+              "api/endpoints/stats"
+            ]
+          },
+          {
+            "group": "System",
+            "pages": [
+              "api/endpoints/health"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "AI-powered Hinglish order extraction using Claude 3.5 Sonnet",
+    "Distributed architecture with BullMQ queue system and horizontal scaling",
+    "GST-compliant invoice generation with one-click PDF export",
+    "Multi-tenant SaaS with organization-based access control",
+    "Real-time job tracking with SSE streaming and correlation IDs",
+    "Security-first design with rate limiting, PII redaction, and input sanitization"
+  ],
+  "publicApiSurface": [
+    "POST /api/extract - Extract order from single message (sync)",
+    "POST /api/extract-order - Extract order from chat history (sync)",
+    "POST /api/async/extract - Queue single message extraction",
+    "POST /api/async/extract-order - Queue chat log extraction",
+    "POST /api/generate-invoice - Generate GST-compliant PDF invoice",
+    "GET /api/orders - List all orders with pagination",
+    "GET /api/orders/:id - Get specific order details",
+    "PATCH /api/orders/:id - Update order status",
+    "DELETE /api/orders/:id - Soft delete an order",
+    "GET /api/jobs/:id - Check background job status",
+    "GET /api/jobs/:id/stream - Real-time SSE job status streaming",
+    "GET /api/queue/health - Queue metrics and health status",
+    "GET /api/health - System health check (DB, Redis, AI)",
+    "GET /api/stats - Organization statistics",
+    "GET /api/admin/dlq - List failed jobs in dead letter queue",
+    "POST /api/admin/dlq/:jobId/retry - Retry specific failed job",
+    "POST /api/admin/dlq/retry-all - Retry all failed jobs"
+  ]
+}
